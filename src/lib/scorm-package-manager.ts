@@ -79,18 +79,50 @@ export class SCORMPackageManager {
 
     const files = new Map<string, Blob>();
     const filePromises: Promise<void>[] = [];
+    let fileCount = 0;
 
     zipContents.forEach((relativePath, zipEntry) => {
       if (!zipEntry.dir) {
+        fileCount++;
         filePromises.push(
           zipEntry.async('blob').then(blob => {
             files.set(relativePath, blob);
+            console.log(`Extracted file: ${relativePath} (${blob.size} bytes)`);
           })
         );
       }
     });
 
+    console.log(`Found ${fileCount} files in SCORM package`);
     await Promise.all(filePromises);
+    console.log(`Successfully extracted all ${files.size} files`);
+    
+    // Check if manifest references files that exist
+    const missingFiles: string[] = [];
+    manifest.resources.forEach(resource => {
+      if (resource.href && !files.has(resource.href) && !files.has(resource.href.replace(/^\/+/, ''))) {
+        missingFiles.push(resource.href);
+        console.warn(`WARNING: Manifest references file "${resource.href}" but it was not found in the package`);
+      }
+    });
+    
+    // Special check for index_lms.html
+    const hasIndexLms = Array.from(files.keys()).some(path => 
+      path.toLowerCase().includes('index_lms.html') || 
+      path.toLowerCase().includes('index_lms.htm')
+    );
+    
+    const manifestReferencesIndexLms = manifest.resources.some(r => 
+      r.href && (r.href.toLowerCase().includes('index_lms.html') || 
+                 r.href.toLowerCase().includes('index_lms.htm'))
+    );
+    
+    if (manifestReferencesIndexLms && !hasIndexLms) {
+      console.error('ERROR: Manifest references "index_lms.html" but this file was not found in the package!');
+      console.log('Available HTML files:', Array.from(files.keys()).filter(f => 
+        f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+      ));
+    }
 
     // Create package object
     const scormPackage: SCORMPackage = {
@@ -125,6 +157,8 @@ export class SCORMPackageManager {
 
   static async storePackage(scormPackage: SCORMPackage): Promise<void> {
     try {
+      console.log(`Starting to store package: ${scormPackage.id} with ${scormPackage.files.size} files`);
+      
       // Store files in IndexedDB for better performance
       const db = await this.openDatabase();
       const transaction = db.transaction(['packages', 'files'], 'readwrite');
@@ -141,13 +175,22 @@ export class SCORMPackageManager {
         size: scormPackage.size
       };
 
+      console.log('Storing package metadata...');
       await new Promise((resolve, reject) => {
         const request = packageStore.put(packageData);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {
+          console.log('Package metadata stored successfully');
+          resolve(request.result);
+        };
+        request.onerror = () => {
+          console.error('Failed to store package metadata:', request.error);
+          reject(request.error);
+        };
       });
 
       // Store files
+      console.log(`Storing ${scormPackage.files.size} files...`);
+      let storedCount = 0;
       for (const [path, blob] of scormPackage.files) {
         await new Promise((resolve, reject) => {
           const request = fileStore.put({
@@ -155,14 +198,29 @@ export class SCORMPackageManager {
             path,
             blob
           });
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            storedCount++;
+            if (storedCount % 10 === 0 || storedCount === scormPackage.files.size) {
+              console.log(`Stored ${storedCount}/${scormPackage.files.size} files`);
+            }
+            resolve(request.result);
+          };
+          request.onerror = () => {
+            console.error(`Failed to store file ${path}:`, request.error);
+            reject(request.error);
+          };
         });
       }
 
       await new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
+        transaction.oncomplete = () => {
+          console.log('All files stored successfully in IndexedDB');
+          resolve();
+        };
+        transaction.onerror = () => {
+          console.error('Transaction failed:', transaction.error);
+          reject(transaction.error);
+        };
       });
 
     } catch (error) {
@@ -338,5 +396,67 @@ export class SCORMPackageManager {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  }
+
+  static async getPackageDebugInfo(packageId: string): Promise<{
+    packageExists: boolean;
+    fileCount: number;
+    fileList: string[];
+    totalSize: number;
+    manifest?: SCORMManifest;
+    error?: string;
+  }> {
+    try {
+      const db = await this.openDatabase();
+      
+      // Get package info
+      const packageTx = db.transaction(['packages'], 'readonly');
+      const packageStore = packageTx.objectStore('packages');
+      const packageData = await new Promise<any>((resolve, reject) => {
+        const request = packageStore.get(packageId);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+
+      if (!packageData) {
+        return {
+          packageExists: false,
+          fileCount: 0,
+          fileList: [],
+          totalSize: 0,
+          error: 'Package not found in database'
+        };
+      }
+
+      // Get all files for this package
+      const fileTx = db.transaction(['files'], 'readonly');
+      const fileStore = fileTx.objectStore('files');
+      const fileIndex = fileStore.index('packageId');
+      
+      const files = await new Promise<any[]>((resolve, reject) => {
+        const request = fileIndex.getAll(packageId);
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+
+      const fileList = files.map(f => f.path);
+      const totalSize = files.reduce((sum, f) => sum + (f.blob?.size || 0), 0);
+
+      return {
+        packageExists: true,
+        fileCount: files.length,
+        fileList: fileList.sort(),
+        totalSize,
+        manifest: packageData.manifest
+      };
+    } catch (error) {
+      return {
+        packageExists: false,
+        fileCount: 0,
+        fileList: [],
+        totalSize: 0,
+        error: error instanceof Error ? error.message : 'Failed to get debug info'
+      };
+    }
   }
 }

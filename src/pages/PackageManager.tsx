@@ -17,11 +17,19 @@ import {
   Package,
   AlertCircle,
   CheckCircle2,
-  ArrowLeft
+  ArrowLeft,
+  Bug
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { SCORMPackageManager, type SCORMPackage, type UploadProgress } from '@/lib/scorm-package-manager';
+import { SCORMDebugger } from '@/components/SCORMDebugger';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 export function PackageManager() {
   const navigate = useNavigate();
@@ -30,6 +38,7 @@ export function PackageManager() {
   const [isLoading, setIsLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [debugPackageId, setDebugPackageId] = useState<string | null>(null);
 
   useEffect(() => {
     loadPackages();
@@ -296,6 +305,16 @@ export function PackageManager() {
                               <Button
                                 variant="outline"
                                 size="sm"
+                                onClick={() => setDebugPackageId(pkg.id)}
+                                className="flex items-center gap-2"
+                              >
+                                <Bug className="h-4 w-4" />
+                                Debug
+                              </Button>
+                              
+                              <Button
+                                variant="outline"
+                                size="sm"
                                 onClick={() => handleDeletePackage(pkg.id)}
                                 className="flex items-center gap-2 text-destructive hover:text-destructive"
                               >
@@ -314,6 +333,16 @@ export function PackageManager() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Debug Dialog */}
+      <Dialog open={!!debugPackageId} onOpenChange={(open) => !open && setDebugPackageId(null)}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>SCORM Package Debugger</DialogTitle>
+          </DialogHeader>
+          {debugPackageId && <SCORMDebugger packageId={debugPackageId} />}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

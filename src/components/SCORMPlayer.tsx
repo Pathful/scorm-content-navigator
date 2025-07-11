@@ -44,6 +44,8 @@ interface PlayerState {
   sessionTime: number;
   lessonStatus: string;
   score: string;
+  apiStatus: 'disconnected' | 'connected' | 'active';
+  lastApiCall?: string;
 }
 
 export function SCORMPlayer({ 
@@ -68,7 +70,8 @@ export function SCORMPlayer({
     showSidebar: true,
     sessionTime: 0,
     lessonStatus: 'not attempted',
-    score: ''
+    score: '',
+    apiStatus: 'disconnected'
   });
 
   // Initialize data store and SCORM API
@@ -77,7 +80,57 @@ export function SCORMPlayer({
     
     // Create and inject SCORM APIs into window
     const { API, API_1484_11 } = createSCORMAPI(dataStoreRef.current);
-    (window as any).API = API;
+    
+    // Wrap API methods to track activity
+    const wrappedAPI = {
+      LMSInitialize: (param: string) => {
+        console.log('SCORM: LMSInitialize called');
+        setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: 'LMSInitialize' }));
+        return API.LMSInitialize(param);
+      },
+      LMSFinish: (param: string) => {
+        console.log('SCORM: LMSFinish called');
+        setState(prev => ({ ...prev, apiStatus: 'connected', lastApiCall: 'LMSFinish' }));
+        return API.LMSFinish(param);
+      },
+      LMSGetValue: (element: string) => {
+        console.log(`SCORM: LMSGetValue("${element}")`);
+        setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: `LMSGetValue: ${element}` }));
+        const value = API.LMSGetValue(element);
+        
+        // Update UI based on values
+        if (element === 'cmi.core.lesson_status') {
+          setState(prev => ({ ...prev, lessonStatus: value }));
+        } else if (element === 'cmi.core.score.raw') {
+          setState(prev => ({ ...prev, score: value }));
+        }
+        
+        return value;
+      },
+      LMSSetValue: (element: string, value: string) => {
+        console.log(`SCORM: LMSSetValue("${element}", "${value}")`);
+        setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: `LMSSetValue: ${element}` }));
+        
+        // Update UI based on values
+        if (element === 'cmi.core.lesson_status') {
+          setState(prev => ({ ...prev, lessonStatus: value }));
+        } else if (element === 'cmi.core.score.raw') {
+          setState(prev => ({ ...prev, score: value }));
+        }
+        
+        return API.LMSSetValue(element, value);
+      },
+      LMSCommit: (param: string) => {
+        console.log('SCORM: LMSCommit called');
+        setState(prev => ({ ...prev, lastApiCall: 'LMSCommit' }));
+        return API.LMSCommit(param);
+      },
+      LMSGetLastError: () => API.LMSGetLastError(),
+      LMSGetErrorString: (errorCode: string) => API.LMSGetErrorString(errorCode),
+      LMSGetDiagnostic: (errorCode: string) => API.LMSGetDiagnostic(errorCode)
+    };
+    
+    (window as any).API = wrappedAPI;
     (window as any).API_1484_11 = API_1484_11;
 
     loadManifest();
@@ -228,7 +281,13 @@ export function SCORMPlayer({
           `/${item.href}`, // Add leading slash
           item.href.toLowerCase(), // Try lowercase
           item.href.replace('.html', '.htm'), // Try .htm extension
-          item.href.replace('.htm', '.html') // Try .html extension
+          item.href.replace('.htm', '.html'), // Try .html extension
+          // Handle common SCORM path patterns
+          `scormcontent/${item.href}`, // Common subfolder
+          `content/${item.href}`, // Another common subfolder
+          `shared/${item.href}`, // Shared assets folder
+          item.href.replace(/\\/g, '/'), // Convert backslashes to forward slashes
+          decodeURIComponent(item.href) // Handle URL-encoded paths
         ];
         
         let contentBlob: Blob | null = null;
@@ -262,12 +321,42 @@ export function SCORMPlayer({
           }
         } else {
           console.error('Content file not found. Tried paths:', possiblePaths);
-          // Let's try to get all files in the package to see what's available
-          const packages = await SCORMPackageManager.getStoredPackages();
-          const currentPackage = packages.find(p => p.id === packageId);
-          console.log('Package manifest:', currentPackage?.manifest);
           
-          throw new Error(`Content file ${item.href} not found in package. Check console for available files.`);
+          // Special check for index_lms.html
+          if (possiblePaths.some(p => p.includes('index_lms.html'))) {
+            console.error('Note: The package is looking for "index_lms.html" but it was not found.');
+            console.log('This might be a path issue in your SCORM package.');
+          }
+          
+          // Let's debug what files are actually in the package
+          const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+          console.log('Available files in package:', debugInfo.fileList);
+          
+          // Check if there's any file with index_lms in the name
+          const indexLmsFiles = debugInfo.fileList.filter(f => 
+            f.toLowerCase().includes('index_lms')
+          );
+          if (indexLmsFiles.length > 0) {
+            console.log('Found files with "index_lms" in name:', indexLmsFiles);
+            console.log('The manifest is pointing to:', item.href);
+            console.log('You may need to update your manifest to point to:', indexLmsFiles[0]);
+          }
+          
+          // Also show potential HTML entry files
+          const htmlFiles = debugInfo.fileList.filter(f => 
+            f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+          );
+          if (htmlFiles.length > 0) {
+            console.log('Available HTML files in package:', htmlFiles);
+          }
+          
+          // SCORM package structure tip
+          console.log('\n📦 SCORM Package Structure Tip:');
+          console.log('Your imsmanifest.xml should reference the exact path of your launch file.');
+          console.log('Common entry point names include: index.html, start.html, launch.html, index_lms.html');
+          console.log('Make sure the <resource> element in your manifest has the correct href attribute.');
+          
+          throw new Error(`Content file "${item.href}" not found in package. The manifest may be pointing to the wrong file. Check the browser console for available files.`);
         }
       } else {
         // Create demo content for demo mode
@@ -297,33 +386,119 @@ export function SCORMPlayer({
         lessonStatus: 'incomplete'
       }));
 
-      // Load content in iframe
-      iframeRef.current.src = contentUrl;
+      // First, inject a SCORM API finder script into the content
+      const scormApiFinderScript = `
+        <script>
+          // SCORM API Finder - Standard SCORM content looks for API in parent windows
+          window.API = null;
+          window.API_1484_11 = null;
+          
+          // Standard SCORM API discovery function
+          function findAPI(win) {
+            var findAttempts = 0;
+            while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
+              findAttempts++;
+              if (findAttempts > 7) {
+                console.log("SCORM API not found after 7 attempts");
+                return null;
+              }
+              win = win.parent;
+            }
+            return win.API;
+          }
+          
+          // Try to find the API
+          if (window.parent && window.parent.API) {
+            window.API = window.parent.API;
+            console.log("SCORM 1.2 API found in parent window");
+          }
+          if (window.parent && window.parent.API_1484_11) {
+            window.API_1484_11 = window.parent.API_1484_11;
+            console.log("SCORM 2004 API found in parent window");
+          }
+          
+          // Also expose getAPI function that some content uses
+          window.getAPI = function() {
+            return window.API || findAPI(window);
+          };
+          
+          console.log("SCORM API Finder initialized");
+        </script>
+      `;
+      
+      // For blob URLs, we need to inject the content with the API finder
+      if (contentUrl.startsWith('blob:')) {
+        // Read the original content
+        fetch(contentUrl)
+          .then(response => response.text())
+          .then(html => {
+            // Inject the SCORM API finder script at the beginning of the body
+            const modifiedHtml = html.replace(
+              /<body([^>]*)>/i,
+              `<body$1>${scormApiFinderScript}`
+            );
+            
+            // Create a new blob with the modified content
+            const modifiedBlob = new Blob([modifiedHtml], { type: 'text/html; charset=utf-8' });
+            const modifiedUrl = URL.createObjectURL(modifiedBlob);
+            
+            // Load the modified content
+            if (iframeRef.current) {
+              iframeRef.current.src = modifiedUrl;
+            }
+            
+            // Clean up the original blob URL
+            URL.revokeObjectURL(contentUrl);
+          })
+          .catch(error => {
+            console.error('Failed to inject SCORM API finder:', error);
+            // Fallback to original URL
+            if (iframeRef.current) {
+              iframeRef.current.src = contentUrl;
+            }
+          });
+      } else {
+        // For non-blob URLs, load directly
+        iframeRef.current.src = contentUrl;
+      }
       
       // Enhanced iframe load handling with debugging
       iframeRef.current.onload = () => {
         console.log('Iframe loaded successfully');
-        if (iframeRef.current?.contentWindow) {
-          console.log('Content window available');
-          
-          // Inject SCORM API
-          (iframeRef.current.contentWindow as any).API = (window as any).API;
-          (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
-          
-          // Check if content is visible
-          setTimeout(() => {
+        
+        // Add a small delay to ensure content is ready
+        setTimeout(() => {
+          if (iframeRef.current?.contentWindow) {
+            console.log('Setting up SCORM API in iframe...');
+            
+            try {
+              // Direct API injection as backup
+              (iframeRef.current.contentWindow as any).API = (window as any).API;
+              (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
+              
+              // Log API availability
+              console.log('SCORM APIs injected into iframe');
+              console.log('API available:', !!(iframeRef.current.contentWindow as any).API);
+              console.log('API_1484_11 available:', !!(iframeRef.current.contentWindow as any).API_1484_11);
+              
+              // Test API calls
+              const testApi = (iframeRef.current.contentWindow as any).API;
+              if (testApi && testApi.LMSInitialize) {
+                console.log('Testing API.LMSInitialize:', testApi.LMSInitialize(''));
+                console.log('Testing API.LMSGetValue("cmi.core.student_name"):', testApi.LMSGetValue('cmi.core.student_name'));
+              }
+            } catch (e) {
+              console.error('Failed to inject SCORM API:', e);
+              console.log('This might be due to cross-origin restrictions with blob URLs');
+            }
+            
+            // Check if content is visible
             if (iframeRef.current?.contentDocument) {
               const body = iframeRef.current.contentDocument.body;
-              console.log('Content body:', body?.innerHTML?.substring(0, 200));
-              console.log('Body dimensions:', {
-                scrollHeight: body?.scrollHeight,
-                scrollWidth: body?.scrollWidth,
-                clientHeight: body?.clientHeight,
-                clientWidth: body?.clientWidth
-              });
+              console.log('Content loaded, body height:', body?.scrollHeight);
             }
-          }, 1000);
-        }
+          }
+        }, 500);
       };
       
       // Add error handling for iframe
@@ -558,6 +733,28 @@ export function SCORMPlayer({
               }
               {state.lessonStatus}
             </Badge>
+            
+            <Badge 
+              variant={state.apiStatus === 'active' ? 'default' : state.apiStatus === 'connected' ? 'secondary' : 'destructive'}
+              className="text-xs"
+            >
+              {state.apiStatus === 'active' ? (
+                <>
+                  <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse mr-1" />
+                  SCORM Active
+                </>
+              ) : state.apiStatus === 'connected' ? (
+                <>
+                  <div className="h-2 w-2 bg-yellow-500 rounded-full mr-1" />
+                  SCORM Ready
+                </>
+              ) : (
+                <>
+                  <div className="h-2 w-2 bg-red-500 rounded-full mr-1" />
+                  SCORM Disconnected
+                </>
+              )}
+            </Badge>
           </div>
         </div>
 
@@ -641,15 +838,18 @@ export function SCORMPlayer({
           {currentItem ? (
             <div className="flex-1 bg-white relative">
               {/* Debug overlay */}
-              <div className="absolute top-0 left-0 bg-black text-white p-2 text-xs z-10 opacity-75">
-                Playing: {currentItem.title} | File: {currentItem.href}
+              <div className="absolute top-0 left-0 bg-black text-white p-2 text-xs z-10 opacity-75 max-w-md">
+                <div>Playing: {currentItem.title} | File: {currentItem.href}</div>
+                {state.lastApiCall && (
+                  <div className="mt-1 text-green-400">Last API: {state.lastApiCall}</div>
+                )}
               </div>
               
               <iframe
                 ref={iframeRef}
                 title={DOMPurify.sanitize(currentItem.title, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })}
                 className="w-full h-full border-0 bg-white"
-                sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups allow-top-navigation-by-user-activation"
+                sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
                 style={{ 
                   minHeight: '600px',
                   width: '100%',
