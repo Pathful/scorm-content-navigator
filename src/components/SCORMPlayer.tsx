@@ -292,13 +292,14 @@ export function SCORMPlayer({
     };
   };
 
-  const processHtmlAssets = async (html: string, packageId?: string): Promise<string> => {
+  const processHtmlAssets = async (html: string, packageId?: string, currentHtmlPath?: string): Promise<string> => {
     if (!packageId) {
       console.log('No package ID provided, skipping asset processing');
       return html;
     }
 
     console.log('Processing HTML assets for package:', packageId);
+    console.log('Current HTML path:', currentHtmlPath);
     
     // Create a map to store blob URLs for assets
     const assetBlobUrls = new Map<string, string>();
@@ -316,15 +317,40 @@ export function SCORMPlayer({
         return assetPath;
       }
       
-      // Clean up the path - handle various path formats
+      // Resolve relative paths based on current HTML file location
       let cleanPath = assetPath;
       
-      // Remove leading slashes and normalize
-      cleanPath = cleanPath.replace(/^\/+/, '');
-      
-      // Handle relative paths that might be relative to the current HTML file
-      if (cleanPath.startsWith('./')) {
-        cleanPath = cleanPath.substring(2);
+      // If we have a current HTML path, resolve relative paths properly
+      if (currentHtmlPath && assetPath.startsWith('../')) {
+        // Get the directory of the current HTML file
+        const currentDir = currentHtmlPath.substring(0, currentHtmlPath.lastIndexOf('/'));
+        
+        // Resolve the relative path
+        const pathParts = currentDir.split('/');
+        const assetParts = assetPath.split('/');
+        
+        // Process each part of the asset path
+        for (const part of assetParts) {
+          if (part === '..') {
+            pathParts.pop(); // Go up one directory
+          } else if (part !== '.') {
+            pathParts.push(part);
+          }
+        }
+        
+        cleanPath = pathParts.join('/');
+      } else {
+        // Remove leading slashes and normalize
+        cleanPath = cleanPath.replace(/^\/+/, '');
+        
+        // Handle relative paths that might be relative to the current HTML file
+        if (cleanPath.startsWith('./')) {
+          cleanPath = cleanPath.substring(2);
+          if (currentHtmlPath) {
+            const currentDir = currentHtmlPath.substring(0, currentHtmlPath.lastIndexOf('/'));
+            cleanPath = currentDir ? `${currentDir}/${cleanPath}` : cleanPath;
+          }
+        }
       }
       
       console.log('Resolving asset:', assetPath, '->', cleanPath);
@@ -369,7 +395,11 @@ export function SCORMPlayer({
             `/${cleanPath}`, // Add / prefix
             cleanPath.toLowerCase(), // Try lowercase
             cleanPath.replace(/\\/g, '/'), // Convert backslashes
-            decodeURIComponent(cleanPath) // Handle URL encoding
+            decodeURIComponent(cleanPath), // Handle URL encoding
+            // Try without the first directory part (for cases like Playing/../shared/file.js -> shared/file.js)
+            cleanPath.includes('/') ? cleanPath.substring(cleanPath.indexOf('/') + 1) : cleanPath,
+            // Try just the filename (for cases like ../shared/file.js -> file.js)
+            cleanPath.includes('/') ? cleanPath.substring(cleanPath.lastIndexOf('/') + 1) : cleanPath
           ];
           
           for (const altPath of alternativePaths) {
@@ -684,7 +714,7 @@ export function SCORMPlayer({
             console.log('Content has SCORM API references:', hasScormAPI);
             
             // Process HTML to resolve asset paths
-            let processedHtml = await processHtmlAssets(html, packageId);
+            let processedHtml = await processHtmlAssets(html, packageId, item.href);
             
             // Debug: Log the processed HTML to see what's happening
             console.log('Processed HTML preview (first 1000 chars):', processedHtml.substring(0, 1000));
