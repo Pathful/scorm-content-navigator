@@ -41,31 +41,42 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
       const resources = manifest.resources || [];
       const items = manifest.organizations?.[0]?.items || [];
       
-      // Check for index_lms.html specifically
+      // Check for index_lms.html specifically (but don't require it)
       const hasIndexLms = info.fileList.some(f => 
         f.toLowerCase().includes('index_lms.html') || 
         f.toLowerCase().includes('index_lms.htm')
       );
 
-      // Find actual entry points from manifest
+      // Find actual entry points from manifest and check if they exist
       const entryPoints = resources
         .filter(r => r.href)
-        .map(r => ({
-          id: r.identifier,
-          href: r.href,
-          type: r.type,
-          exists: info.fileList.includes(r.href) || 
-                  info.fileList.includes(r.href.replace(/^\/+/, '')) ||
-                  info.fileList.includes('/' + r.href)
-        }));
+        .map(r => {
+          const href = r.href;
+          const normalizedHref = href.replace(/^\/+/, ''); // Remove leading slashes
+          const exists = info.fileList.some(f => 
+            f.toLowerCase() === href.toLowerCase() ||
+            f.toLowerCase() === normalizedHref.toLowerCase() ||
+            f.toLowerCase() === '/' + normalizedHref.toLowerCase()
+          );
+          
+          return {
+            id: r.identifier,
+            href: r.href,
+            type: r.type,
+            exists
+          };
+        });
 
-      // Find files that look like they could be entry points
-      const potentialEntryFiles = info.fileList.filter(f => 
+      // Check if any entry points from manifest actually exist
+      const hasValidEntryPoints = entryPoints.some(ep => ep.exists);
+
+      // Find files that look like they could be entry points (only if no valid entry points)
+      const potentialEntryFiles = !hasValidEntryPoints ? info.fileList.filter(f => 
         (f.toLowerCase().includes('index') || 
          f.toLowerCase().includes('start') || 
          f.toLowerCase().includes('launch')) &&
         (f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm'))
-      );
+      ) : [];
 
       setDebugInfo({
         packageId,
@@ -74,6 +85,7 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
         totalSize: SCORMPackageManager.formatFileSize(info.totalSize),
         hasManifest: info.fileList.includes('imsmanifest.xml'),
         hasIndexLms,
+        hasValidEntryPoints,
         entryPoints,
         fileList: info.fileList,
         potentialEntryFiles,
@@ -141,6 +153,13 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
               <Badge variant="secondary"><AlertCircle className="h-3 w-3 mr-1" />Not Found</Badge>
             }
           </div>
+          <div className="flex justify-between items-center">
+            <span className="text-muted-foreground">Entry Points:</span>
+            {debugInfo.hasValidEntryPoints ? 
+              <Badge variant="default"><CheckCircle2 className="h-3 w-3 mr-1" />Valid</Badge> : 
+              <Badge variant="destructive"><AlertCircle className="h-3 w-3 mr-1" />Missing</Badge>
+            }
+          </div>
         </div>
       </Card>
 
@@ -161,9 +180,25 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
             ))}
           </div>
         )}
-      </Card>
+              </Card>
 
-      {!debugInfo.hasIndexLms && debugInfo.potentialEntryFiles.length > 0 && (
+      {debugInfo.hasValidEntryPoints && (
+        <Card className="p-4 border-green-200 bg-green-50">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="h-5 w-5 text-green-600 mt-0.5" />
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-green-900">
+                Valid Entry Points Found
+              </p>
+              <p className="text-sm text-green-800">
+                Your SCORM package has valid entry points defined in the manifest and the files exist.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {!debugInfo.hasValidEntryPoints && debugInfo.potentialEntryFiles.length > 0 && (
         <Card className="p-4 border-amber-200 bg-amber-50">
           <div className="flex items-start gap-2">
             <Info className="h-5 w-5 text-amber-600 mt-0.5" />
@@ -172,7 +207,7 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
                 Potential Entry Files Found
               </p>
               <p className="text-sm text-amber-800">
-                Your manifest is looking for "index_lms.html" but it wasn't found. These files might be what you're looking for:
+                No valid entry points were found in your manifest. These files might be what you're looking for:
               </p>
               <div className="space-y-1">
                 {debugInfo.potentialEntryFiles.map((file: string) => (
@@ -182,7 +217,7 @@ export function SCORMDebugger({ packageId }: SCORMDebuggerProps) {
                 ))}
               </div>
               <p className="text-xs text-amber-700 mt-2">
-                Update your imsmanifest.xml to point to the correct file.
+                Update your imsmanifest.xml to point to one of these files.
               </p>
             </div>
           </div>

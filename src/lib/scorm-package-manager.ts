@@ -307,12 +307,37 @@ export class SCORMPackageManager {
       const db = await this.openDatabase();
       const transaction = db.transaction(['files'], 'readonly');
       const store = transaction.objectStore('files');
-      const index = store.index('packageId');
-
+      
+      // Try using the packagePath compound index first
+      const packagePathIndex = store.index('packagePath');
+      
       return new Promise((resolve, reject) => {
-        const request = index.get([packageId, filePath]);
+        const request = packagePathIndex.get([packageId, filePath]);
         request.onsuccess = () => {
-          resolve(request.result?.blob || null);
+          if (request.result) {
+            console.log(`Found file via packagePath index: ${filePath}`);
+            resolve(request.result.blob);
+          } else {
+            // Fallback: get all files for this package and find by path
+            console.log(`File not found via packagePath index, trying fallback for: ${filePath}`);
+            const packageIdIndex = store.index('packageId');
+            const getAllRequest = packageIdIndex.getAll(packageId);
+            
+            getAllRequest.onsuccess = () => {
+              const files = getAllRequest.result;
+              const file = files.find(f => f.path === filePath);
+              if (file) {
+                console.log(`Found file via fallback: ${filePath}`);
+                resolve(file.blob);
+              } else {
+                console.log(`File not found in package: ${filePath}`);
+                console.log(`Available files in package:`, files.map(f => f.path));
+                resolve(null);
+              }
+            };
+            
+            getAllRequest.onerror = () => reject(getAllRequest.error);
+          }
         };
         request.onerror = () => reject(request.error);
       });
