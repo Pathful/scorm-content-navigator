@@ -17,7 +17,9 @@ import {
   AlertCircle,
   Menu,
   X,
-  FileText
+  FileText,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -41,6 +43,7 @@ interface PlayerState {
   manifest: SCORMManifest | null;
   playableItems: SCORMItem[];
   showSidebar: boolean;
+  showDebugInfo: boolean;
   sessionTime: number;
   lessonStatus: string;
   score: string;
@@ -68,6 +71,7 @@ export function SCORMPlayer({
     manifest: null,
     playableItems: [],
     showSidebar: true,
+    showDebugInfo: false,
     sessionTime: 0,
     lessonStatus: 'not attempted',
     score: '',
@@ -104,7 +108,7 @@ export function SCORMPlayer({
           return 'false'; // ✅ Return 'false' per SCORM spec
         }
         setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: 'LMSInitialize' }));
-        const result = API.lmsInitialize(param);
+        const result = API.lmsInitialize();
         if (result === 'true') {
           isInitialized = true;
         }
@@ -113,7 +117,7 @@ export function SCORMPlayer({
       LMSFinish: (param: string) => {
         console.log('SCORM: LMSFinish called');
         setState(prev => ({ ...prev, apiStatus: 'connected', lastApiCall: 'LMSFinish' }));
-        const result = API.lmsFinish(param);
+        const result = API.lmsFinish();
         if (result === 'true') {
           isInitialized = false; // Reset initialization state
         }
@@ -155,7 +159,7 @@ export function SCORMPlayer({
       LMSCommit: (param: string) => {
         console.log('SCORM: LMSCommit called');
         setState(prev => ({ ...prev, lastApiCall: 'LMSCommit' }));
-        return API.lmsCommit(param);
+        return API.lmsCommit();
       },
       LMSGetLastError: () => API.lmsGetLastError(),
       LMSGetErrorString: (errorCode: string) => API.lmsGetErrorString(errorCode),
@@ -235,6 +239,10 @@ export function SCORMPlayer({
       
       const resolvedManifest = SCORMManifestParser.resolveItemResources(manifest);
       const playableItems = SCORMManifestParser.getPlayableItems(resolvedManifest);
+      
+      console.log('✓ Manifest processing complete');
+      console.log('Resolved manifest:', resolvedManifest);
+      console.log('Playable items:', playableItems);
 
       setState(prev => ({
         ...prev,
@@ -244,7 +252,11 @@ export function SCORMPlayer({
       }));
 
       if (playableItems.length > 0) {
+        console.log('✓ Manifest loaded successfully, calling loadSCO(0)');
+        console.log('Playable items count:', playableItems.length);
         loadSCO(0);
+      } else {
+        console.warn('⚠ No playable items found in manifest');
       }
 
     } catch (error) {
@@ -315,7 +327,17 @@ export function SCORMPlayer({
   };
 
   const loadSCO = useCallback(async (itemIndex: number) => {
-    if (!state.playableItems[itemIndex] || !iframeRef.current) return;
+    console.log('=== loadSCO called ===');
+    console.log('Item index:', itemIndex);
+    console.log('Playable items:', state.playableItems);
+    console.log('Iframe ref:', iframeRef.current);
+    
+    if (!state.playableItems[itemIndex] || !iframeRef.current) {
+      console.error('❌ Cannot load SCO - missing item or iframe ref');
+      console.log('Item exists:', !!state.playableItems[itemIndex]);
+      console.log('Iframe ref exists:', !!iframeRef.current);
+      return;
+    }
 
     const item = state.playableItems[itemIndex];
     
@@ -327,7 +349,7 @@ export function SCORMPlayer({
         console.log('Loading SCO for item:', item);
         console.log('Looking for file:', item.href);
         
-        // Try multiple possible file paths
+        // Enhanced file path resolution with better debugging
         const possiblePaths = [
           item.href,
           item.href.replace(/^\/+/, ''), // Remove leading slashes
@@ -340,18 +362,28 @@ export function SCORMPlayer({
           `content/${item.href}`, // Another common subfolder
           `shared/${item.href}`, // Shared assets folder
           item.href.replace(/\\/g, '/'), // Convert backslashes to forward slashes
-          decodeURIComponent(item.href) // Handle URL-encoded paths
+          decodeURIComponent(item.href), // Handle URL-encoded paths
+          // Additional common patterns
+          `assets/${item.href}`,
+          `files/${item.href}`,
+          `media/${item.href}`,
+          // Try without any path prefix
+          item.href.split('/').pop() || item.href
         ];
         
         let contentBlob: Blob | null = null;
         let foundPath = '';
+        
+        // First, let's get debug info to see what files are actually available
+        const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+        console.log('Available files in package:', debugInfo.fileList);
         
         for (const path of possiblePaths) {
           console.log('Trying path:', path);
           contentBlob = await SCORMPackageManager.getPackageFile(packageId, path);
           if (contentBlob) {
             foundPath = path;
-            console.log('Found content at path:', path);
+            console.log('✓ Found content at path:', path);
             break;
           }
         }
@@ -361,14 +393,25 @@ export function SCORMPlayer({
           if (item.href.toLowerCase().includes('.html') || item.href.toLowerCase().includes('.htm')) {
             const text = await contentBlob.text();
             
-            // Simple SCORM API injection - no complex asset processing
+            // Check if this is Articulate Storyline content
+            const isStorylineContent = text.includes('Articulate') || 
+                                     text.includes('Storyline') || 
+                                     text.includes('lms/scormdriver.js') ||
+                                     text.includes('story_content/user.js');
+            
+            console.log('Content type detected:', isStorylineContent ? 'Storyline' : 'Standard HTML');
+            
+            // Enhanced SCORM API injection with better error handling
             const scormApiScript = `
               <script>
-                // Simple SCORM API injection
+                // Enhanced SCORM API injection
+                console.log('SCORM API injection starting...');
+                
+                // Make APIs available immediately
                 if (window.parent && window.parent.API) {
                   window.API = window.parent.API;
                   window.API_1484_11 = window.parent.API_1484_11;
-                  console.log("✓ SCORM API injected");
+                  console.log("✓ SCORM API injected from parent");
                 }
                 
                 // Standard SCORM API discovery
@@ -376,7 +419,10 @@ export function SCORMPlayer({
                   var findAttempts = 0;
                   while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
                     findAttempts++;
-                    if (findAttempts > 7) return null;
+                    if (findAttempts > 7) {
+                      console.log("SCORM API not found after 7 attempts");
+                      return null;
+                    }
                     win = win.parent;
                   }
                   return win.API;
@@ -385,30 +431,243 @@ export function SCORMPlayer({
                 window.getAPI = function() {
                   return window.API || window.findAPI(window);
                 };
+                
+                // Auto-initialize SCORM when page loads
+                function initializeSCORM() {
+                  try {
+                    const api = window.getAPI();
+                    if (api) {
+                      console.log('Initializing SCORM session...');
+                      const initResult = api.LMSInitialize('');
+                      console.log('LMSInitialize result:', initResult);
+                      
+                      if (initResult === 'true') {
+                        console.log('✓ SCORM session initialized successfully');
+                        // Set initial status
+                        api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                        api.LMSCommit('');
+                      } else {
+                        console.warn('⚠ SCORM initialization returned false');
+                      }
+                    } else {
+                      console.warn('⚠ SCORM API not available for initialization');
+                    }
+                  } catch (e) {
+                    console.error('❌ SCORM initialization failed:', e);
+                  }
+                }
+                
+                // Initialize when DOM is ready
+                if (document.readyState === 'loading') {
+                  document.addEventListener('DOMContentLoaded', initializeSCORM);
+                } else {
+                  initializeSCORM();
+                }
+                
+                console.log('✓ SCORM API injection completed');
               </script>
             `;
             
-            // Inject API script into the HTML
+            // Inject API script into the HTML with better placement
             let modifiedHtml = text;
-            if (text.includes('<head')) {
-              modifiedHtml = text.replace(
-                /<head([^>]*)>/i,
-                `<head$1>${scormApiScript}`
-              );
+            
+            // For Storyline content, we need to be more careful about script injection
+            if (isStorylineContent) {
+              console.log('✓ Detected Storyline content - using specialized injection');
+              
+              // Storyline-specific modifications
+              // 1. Ensure SCORM API is available before any other scripts
+              const storylineApiScript = `
+                <script>
+                  // Storyline-specific SCORM API injection
+                  console.log('Storyline SCORM API injection starting...');
+                  
+                  // Make APIs available immediately for Storyline
+                  if (window.parent && window.parent.API) {
+                    window.API = window.parent.API;
+                    window.API_1484_11 = window.parent.API_1484_11;
+                    console.log("✓ Storyline SCORM API injected from parent");
+                  }
+                  
+                  // Standard SCORM API discovery for Storyline
+                  window.findAPI = function(win) {
+                    var findAttempts = 0;
+                    while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
+                      findAttempts++;
+                      if (findAttempts > 7) {
+                        console.log("SCORM API not found after 7 attempts");
+                        return null;
+                      }
+                      win = win.parent;
+                    }
+                    return win.API;
+                  };
+                  
+                  window.getAPI = function() {
+                    return window.API || window.findAPI(window);
+                  };
+                  
+                  // Storyline-specific initialization
+                  function initializeStorylineSCORM() {
+                    try {
+                      const api = window.getAPI();
+                      if (api) {
+                        console.log('Initializing Storyline SCORM session...');
+                        
+                        // Storyline often needs multiple initialization attempts
+                        let initResult = api.LMSInitialize('');
+                        console.log('Storyline LMSInitialize result:', initResult);
+                        
+                        if (initResult === 'true') {
+                          console.log('✓ Storyline SCORM session initialized successfully');
+                          // Set initial status for Storyline
+                          api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                          api.LMSCommit('');
+                        } else {
+                          console.warn('⚠ Storyline SCORM initialization returned false, retrying...');
+                          
+                          // Retry with a delay - Storyline sometimes needs time to fully load
+                          setTimeout(() => {
+                            try {
+                              console.log('Retrying Storyline SCORM initialization...');
+                              const retryResult = api.LMSInitialize('');
+                              console.log('Storyline retry result:', retryResult);
+                              
+                              if (retryResult === 'true') {
+                                console.log('✓ Storyline SCORM session initialized on retry');
+                                api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                                api.LMSCommit('');
+                              } else {
+                                console.warn('⚠ Storyline SCORM retry also failed, trying alternative approach...');
+                                
+                                // Try alternative initialization approach for Storyline
+                                setTimeout(() => {
+                                  try {
+                                    // Some Storyline content needs specific parameters
+                                    const altResult = api.LMSInitialize('true');
+                                    console.log('Storyline alternative init result:', altResult);
+                                    
+                                    if (altResult === 'true') {
+                                      console.log('✓ Storyline SCORM session initialized with alternative method');
+                                      api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                                      api.LMSCommit('');
+                                    } else {
+                                      console.error('❌ All Storyline SCORM initialization attempts failed');
+                                    }
+                                  } catch (e) {
+                                    console.error('❌ Alternative Storyline initialization failed:', e);
+                                  }
+                                }, 1000);
+                              }
+                            } catch (e) {
+                              console.error('❌ Storyline SCORM retry failed:', e);
+                            }
+                          }, 2000); // Longer delay for Storyline
+                        }
+                      } else {
+                        console.warn('⚠ Storyline SCORM API not available for initialization');
+                        
+                        // Try to find API using alternative methods
+                        setTimeout(() => {
+                          try {
+                            const foundAPI = window.findAPI(window);
+                            if (foundAPI) {
+                              console.log('✓ Found Storyline SCORM API via alternative method');
+                              initializeStorylineSCORM();
+                            } else {
+                              console.error('❌ Storyline SCORM API not found via any method');
+                            }
+                          } catch (e) {
+                            console.error('❌ Alternative API discovery failed:', e);
+                          }
+                        }, 1000);
+                      }
+                    } catch (e) {
+                      console.error('❌ Storyline SCORM initialization failed:', e);
+                    }
+                  }
+                  
+                  // Initialize when DOM is ready for Storyline
+                  if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', initializeStorylineSCORM);
+                  } else {
+                    // For already loaded content, delay initialization to ensure Storyline is ready
+                    setTimeout(initializeStorylineSCORM, 1000);
+                  }
+                  
+                  console.log('✓ Storyline SCORM API injection completed');
+                </script>
+              `;
+              
+              // Inject at the very beginning for Storyline content
+              const assetHandlerScript = createStorylineAssetHandler(packageId);
+              modifiedHtml = storylineApiScript + assetHandlerScript + text;
+              
             } else {
-              modifiedHtml = scormApiScript + text;
+              // Standard HTML content injection
+              // Try to inject in head first
+              if (text.includes('<head')) {
+                modifiedHtml = text.replace(
+                  /<head([^>]*)>/i,
+                  `<head$1>${scormApiScript}`
+                );
+              } else if (text.includes('<body')) {
+                // If no head, inject at start of body
+                modifiedHtml = text.replace(
+                  /<body([^>]*)>/i,
+                  `<body$1>${scormApiScript}`
+                );
+              } else {
+                // Last resort: inject at the very beginning
+                modifiedHtml = scormApiScript + text;
+              }
             }
             
             // Create blob URL for the modified HTML
             const htmlBlob = new Blob([modifiedHtml], { type: 'text/html; charset=utf-8' });
             contentUrl = URL.createObjectURL(htmlBlob);
+            console.log('✓ HTML content prepared with SCORM API injection');
           } else {
             // For non-HTML files, serve directly
             contentUrl = URL.createObjectURL(contentBlob);
+            console.log('✓ Non-HTML content served directly');
           }
         } else {
-          console.error('Content file not found. Tried paths:', possiblePaths);
-          throw new Error(`Content file "${item.href}" not found in package.`);
+          console.error('❌ Content file not found. Tried paths:', possiblePaths);
+          console.error('Available files:', debugInfo.fileList);
+          
+          // Try to find any HTML file as fallback
+          const htmlFiles = debugInfo.fileList.filter(f => 
+            f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+          );
+          
+          if (htmlFiles.length > 0) {
+            console.log('Trying fallback HTML file:', htmlFiles[0]);
+            const fallbackBlob = await SCORMPackageManager.getPackageFile(packageId, htmlFiles[0]);
+            if (fallbackBlob) {
+              const text = await fallbackBlob.text();
+              const scormApiScript = `
+                <script>
+                  if (window.parent && window.parent.API) {
+                    window.API = window.parent.API;
+                    window.API_1484_11 = window.parent.API_1484_11;
+                    console.log("✓ SCORM API injected (fallback)");
+                  }
+                </script>
+              `;
+              const modifiedHtml = text.replace(
+                /<head([^>]*)>/i,
+                `<head$1>${scormApiScript}`
+              );
+              const htmlBlob = new Blob([modifiedHtml], { type: 'text/html; charset=utf-8' });
+              contentUrl = URL.createObjectURL(htmlBlob);
+              console.log('✓ Using fallback HTML file');
+            } else {
+              throw new Error(`Content file "${item.href}" not found in package. Available files: ${debugInfo.fileList.join(', ')}`);
+            }
+          } else {
+            throw new Error(`Content file "${item.href}" not found in package. No HTML files available. Available files: ${debugInfo.fileList.join(', ')}`);
+          }
         }
       } else {
         // Create demo content for demo mode
@@ -417,16 +676,6 @@ export function SCORMPlayer({
         contentUrl = URL.createObjectURL(blob);
       }
 
-      // Initialize SCORM session
-      // Remove this section - let content handle its own initialization
-      // if (scormAdapterRef.current) {
-      //   scormAdapterRef.current.getSCORM12API().lmsInitialize('');
-      //   scormAdapterRef.current.updateStudentData({
-      //     lessonLocation: item.identifier,
-      //     lessonStatus: 'incomplete'
-      //   });
-      // }
-
       setState(prev => ({
         ...prev,
         currentItemIndex: itemIndex,
@@ -434,30 +683,100 @@ export function SCORMPlayer({
         lessonStatus: 'incomplete'
       }));
 
-      // Load content into iframe
+      // Load content into iframe with enhanced error handling
       if (iframeRef.current) {
-        iframeRef.current.src = contentUrl;
+        console.log('Loading content into iframe:', contentUrl);
+        console.log('Content URL type:', typeof contentUrl);
+        console.log('Content URL length:', contentUrl?.length);
+        
+        if (contentUrl) {
+          iframeRef.current.src = contentUrl;
+          console.log('✓ Iframe src set successfully');
+        } else {
+          console.error('❌ Content URL is empty or undefined');
+          toast({
+            title: "Content Load Error",
+            description: "Failed to create content URL",
+            variant: "destructive"
+          });
+        }
+      } else {
+        console.error('❌ Iframe reference is null');
       }
 
-      // Immediate API injection
+      // Enhanced iframe load handler with better API injection
       iframeRef.current.onload = () => {
-        console.log('Iframe loaded successfully');
+        console.log('✓ Iframe loaded successfully');
         
-        // Inject SCORM API immediately
-        if (iframeRef.current?.contentWindow) {
-          try {
-            (iframeRef.current.contentWindow as any).API = (window as any).API;
-            (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
-            (iframeRef.current.contentWindow as any).findAPI = (window as any).findAPI;
-            (iframeRef.current.contentWindow as any).getAPI = (window as any).getAPI;
-            
-            console.log('✓ SCORM APIs injected immediately');
-            setState(prev => ({ ...prev, apiStatus: 'connected' }));
-          } catch (e) {
-            console.error('❌ Failed to inject SCORM API:', e);
-            setState(prev => ({ ...prev, apiStatus: 'disconnected' }));
+        // Inject SCORM API immediately after load
+        setTimeout(() => {
+          if (iframeRef.current?.contentWindow) {
+            try {
+              // Inject APIs into iframe
+              (iframeRef.current.contentWindow as any).API = (window as any).API;
+              (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
+              (iframeRef.current.contentWindow as any).findAPI = (window as any).findAPI;
+              (iframeRef.current.contentWindow as any).getAPI = (window as any).getAPI;
+              
+              console.log('✓ SCORM APIs injected immediately');
+              setState(prev => ({ ...prev, apiStatus: 'connected' }));
+              
+              // Trigger initial SCORM session with retry logic
+              setTimeout(() => {
+                try {
+                  if (iframeRef.current?.contentWindow) {
+                    const iframeAPI = (iframeRef.current.contentWindow as any).API;
+                    if (iframeAPI) {
+                      console.log('Triggering initial SCORM session...');
+                      const initResult = iframeAPI.LMSInitialize('');
+                      console.log('Initial LMSInitialize result:', initResult);
+                      
+                      if (initResult === 'true') {
+                        setState(prev => ({ ...prev, apiStatus: 'active' }));
+                        console.log('✓ SCORM session activated');
+                        
+                        // Set initial status
+                        iframeAPI.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                        iframeAPI.LMSCommit('');
+                      } else {
+                        console.warn('⚠ SCORM initialization returned false, will retry...');
+                        // Retry with longer delay
+                        setTimeout(() => {
+                          try {
+                            const retryResult = iframeAPI.LMSInitialize('');
+                            if (retryResult === 'true') {
+                              setState(prev => ({ ...prev, apiStatus: 'active' }));
+                              console.log('✓ SCORM session activated on retry');
+                              iframeAPI.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                              iframeAPI.LMSCommit('');
+                            }
+                          } catch (e) {
+                            console.error('❌ SCORM retry failed:', e);
+                          }
+                        }, 1000);
+                      }
+                    }
+                  }
+                } catch (e) {
+                  console.error('❌ Failed to initialize SCORM session:', e);
+                }
+              }, 200); // Increased delay to ensure content is ready
+            } catch (e) {
+              console.error('❌ Failed to inject SCORM API:', e);
+              setState(prev => ({ ...prev, apiStatus: 'disconnected' }));
+            }
           }
-        }
+        }, 100);
+      };
+
+      // Handle iframe load errors
+      iframeRef.current.onerror = () => {
+        console.error('❌ Iframe failed to load content');
+        toast({
+          title: "Content Load Error",
+          description: "Failed to load the content into the iframe",
+          variant: "destructive"
+        });
       };
 
       toast({
@@ -576,8 +895,12 @@ export function SCORMPlayer({
                 document.getElementById('progressBar').style.width = progress + '%';
                 
                 if (window.API) {
-                    window.API.LMSSetValue('cmi.core.score.raw', progress.toString());
-                    window.API.LMSCommit('');
+                    try {
+                        window.API.LMSSetValue('cmi.core.score.raw', progress.toString());
+                        window.API.LMSCommit('');
+                    } catch (e) {
+                        console.error('❌ Failed to update progress:', e);
+                    }
                 }
             }
             
@@ -590,16 +913,25 @@ export function SCORMPlayer({
                 document.getElementById('sessionTime').textContent = hours + ':' + minutes + ':' + seconds;
                 
                 if (window.API) {
-                    window.API.LMSSetValue('cmi.core.session_time', hours + ':' + minutes + ':' + seconds);
+                    try {
+                        window.API.LMSSetValue('cmi.core.session_time', hours + ':' + minutes + ':' + seconds);
+                    } catch (e) {
+                        console.error('❌ Failed to update session time:', e);
+                    }
                 }
             }
             
             function completeLesson() {
                 if (window.API) {
-                    window.API.LMSSetValue('cmi.core.lesson_status', 'completed');
-                    window.API.LMSSetValue('cmi.core.score.raw', '100');
-                    window.API.LMSCommit('');
-                    window.API.LMSFinish('');
+                    try {
+                        window.API.LMSSetValue('cmi.core.lesson_status', 'completed');
+                        window.API.LMSSetValue('cmi.core.score.raw', '100');
+                        window.API.LMSCommit('');
+                        window.API.LMSFinish('');
+                        console.log('✓ Lesson completed successfully via SCORM API');
+                    } catch (e) {
+                        console.error('❌ Failed to complete lesson via SCORM API:', e);
+                    }
                 }
                 
                 document.getElementById('status').textContent = 'Completed';
@@ -608,9 +940,32 @@ export function SCORMPlayer({
             }
             
             // Initialize SCORM
-            if (window.API) {
-                window.API.LMSInitialize('');
-                window.API.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+            function initializeSCORM() {
+                if (window.API) {
+                    try {
+                        console.log('Initializing SCORM session...');
+                        const initResult = window.API.LMSInitialize('');
+                        console.log('LMSInitialize result:', initResult);
+                        
+                        if (initResult === 'true') {
+                            window.API.LMSSetValue('cmi.core.lesson_status', 'incomplete');
+                            console.log('✓ SCORM session initialized successfully');
+                        } else {
+                            console.warn('⚠ SCORM initialization returned false');
+                        }
+                    } catch (e) {
+                        console.error('❌ SCORM initialization failed:', e);
+                    }
+                } else {
+                    console.warn('⚠ SCORM API not available for initialization');
+                }
+            }
+            
+            // Initialize when page loads
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initializeSCORM);
+            } else {
+                initializeSCORM();
             }
             
             // Update progress and time periodically
@@ -653,11 +1008,28 @@ export function SCORMPlayer({
         
         (window as any).API.LMSFinish('');
         console.log('✓ LMSFinish completed');
+        
+        // Update UI status to active
+        setState(prev => ({ ...prev, apiStatus: 'active' }));
+        toast({
+          title: "SCORM Test Successful",
+          description: "All SCORM API calls completed successfully"
+        });
       } catch (e) {
         console.error('❌ Window API test failed:', e);
+        toast({
+          title: "SCORM Test Failed",
+          description: "Error testing SCORM API calls",
+          variant: "destructive"
+        });
       }
     } else {
       console.log('❌ Window API not available');
+      toast({
+        title: "SCORM API Not Available",
+        description: "Window SCORM API is not accessible",
+        variant: "destructive"
+      });
     }
     
     // Test iframe API
@@ -669,6 +1041,10 @@ export function SCORMPlayer({
           console.log('✓ Iframe API available');
           const initResult = iframeAPI.LMSInitialize('');
           console.log('✓ Iframe LMSInitialize result:', initResult);
+          
+          if (initResult === 'true') {
+            setState(prev => ({ ...prev, apiStatus: 'active' }));
+          }
         } else {
           console.log('❌ Iframe API not available');
         }
@@ -686,6 +1062,327 @@ export function SCORMPlayer({
       scormAdapterRef.current.debug();
     } else {
       console.log('❌ SCORM adapter not available');
+    }
+  };
+
+  const debugContentLoading = async () => {
+    console.log('=== Debugging Content Loading ===');
+    
+    if (!packageId) {
+      console.log('No packageId provided - running in demo mode');
+      return;
+    }
+    
+    try {
+      // Get package debug info
+      const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+      console.log('Package debug info:', debugInfo);
+      
+      if (!debugInfo.packageExists) {
+        console.error('❌ Package not found in database');
+        toast({
+          title: "Package Not Found",
+          description: debugInfo.error || "Package not found in database",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      // Check current item
+      const currentItem = state.playableItems[state.currentItemIndex];
+      if (!currentItem) {
+        console.error('❌ No current item to debug');
+        return;
+      }
+      
+      console.log('Current item:', currentItem);
+      console.log('Available files:', debugInfo.fileList);
+      
+      // Test file loading
+      const testPaths = [
+        currentItem.href,
+        currentItem.href.replace(/^\/+/, ''),
+        currentItem.href.toLowerCase(),
+        currentItem.href.split('/').pop() || currentItem.href
+      ];
+      
+      for (const path of testPaths) {
+        console.log(`Testing path: ${path}`);
+        const blob = await SCORMPackageManager.getPackageFile(packageId, path);
+        if (blob) {
+          console.log(`✓ Found file at: ${path} (${blob.size} bytes)`);
+          
+          if (path.toLowerCase().endsWith('.html') || path.toLowerCase().endsWith('.htm')) {
+            const text = await blob.text();
+            console.log(`✓ HTML content length: ${text.length} characters`);
+            console.log(`✓ Contains <head>: ${text.includes('<head')}`);
+            console.log(`✓ Contains <body>: ${text.includes('<body')}`);
+            console.log(`✓ Contains <script>: ${text.includes('<script')}`);
+          }
+          break;
+        } else {
+          console.log(`❌ File not found at: ${path}`);
+        }
+      }
+      
+      // Check iframe state
+      if (iframeRef.current) {
+        console.log('Iframe src:', iframeRef.current.src);
+        console.log('Iframe readyState:', iframeRef.current.contentDocument?.readyState);
+        console.log('Iframe contentWindow available:', !!iframeRef.current.contentWindow);
+      }
+      
+      toast({
+        title: "Debug Complete",
+        description: "Check console for detailed debug information"
+      });
+      
+    } catch (error) {
+      console.error('Debug error:', error);
+      toast({
+        title: "Debug Failed",
+        description: error instanceof Error ? error.message : "Debug operation failed",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const testContentLoading = async () => {
+    console.log('=== Testing Content Loading ===');
+    
+    if (!packageId) {
+      console.log('No packageId - testing demo mode');
+      // Test demo content loading
+      const demoItem = {
+        identifier: 'test',
+        title: 'Test Content',
+        href: 'test.html',
+        isVisible: true,
+        children: []
+      };
+      
+      const demoContent = createDemoContent(demoItem);
+      const blob = new Blob([demoContent], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      
+      console.log('Demo content URL:', url);
+      console.log('Demo content length:', demoContent.length);
+      
+      toast({
+        title: "Demo Test Complete",
+        description: "Demo content created successfully"
+      });
+      return;
+    }
+    
+    try {
+      const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+      console.log('Package test info:', {
+        exists: debugInfo.packageExists,
+        fileCount: debugInfo.fileCount,
+        totalSize: debugInfo.totalSize,
+        hasManifest: debugInfo.fileList.includes('imsmanifest.xml'),
+        htmlFiles: debugInfo.fileList.filter(f => 
+          f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+        )
+      });
+      
+      if (!debugInfo.packageExists) {
+        toast({
+          title: "Package Not Found",
+          description: "The specified package does not exist",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      // Test loading the first HTML file
+      const htmlFiles = debugInfo.fileList.filter(f => 
+        f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+      );
+      
+      if (htmlFiles.length === 0) {
+        toast({
+          title: "No HTML Files",
+          description: "No HTML files found in the package",
+          variant: "destructive"
+        });
+        return;
+      }
+      
+      const testFile = htmlFiles[0];
+      console.log('Testing file:', testFile);
+      
+      const blob = await SCORMPackageManager.getPackageFile(packageId, testFile);
+      if (blob) {
+        const text = await blob.text();
+        console.log('File loaded successfully:', {
+          size: blob.size,
+          textLength: text.length,
+          hasHead: text.includes('<head'),
+          hasBody: text.includes('<body'),
+          hasScript: text.includes('<script')
+        });
+        
+        toast({
+          title: "File Load Test Successful",
+          description: `Successfully loaded ${testFile} (${blob.size} bytes)`
+        });
+      } else {
+        toast({
+          title: "File Load Test Failed",
+          description: `Failed to load ${testFile}`,
+          variant: "destructive"
+        });
+      }
+      
+    } catch (error) {
+      console.error('Test error:', error);
+      toast({
+        title: "Test Failed",
+        description: error instanceof Error ? error.message : "Test operation failed",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const createStorylineAssetHandler = (packageId: string) => {
+    return `
+      <script>
+        // Storyline Asset Handler
+        window.storylineAssetHandler = {
+          packageId: '${packageId}',
+          
+          // Intercept asset requests and serve from package
+          getAsset: async function(path) {
+            try {
+              console.log('Storyline requesting asset:', path);
+              
+              // Try to get the asset from the package
+              const response = await fetch('/api/scorm-asset?packageId=${packageId}&path=' + encodeURIComponent(path));
+              if (response.ok) {
+                const blob = await response.blob();
+                return URL.createObjectURL(blob);
+              }
+              
+              // Fallback to original path
+              return path;
+            } catch (e) {
+              console.warn('Failed to load asset:', path, e);
+              return path;
+            }
+          },
+          
+          // Override document.createElement to intercept script and link tags
+          interceptAssetLoading: function() {
+            const originalCreateElement = document.createElement;
+            document.createElement = function(tagName) {
+              const element = originalCreateElement.call(document, tagName);
+              
+              if (tagName.toLowerCase() === 'script' || tagName.toLowerCase() === 'link') {
+                const originalSetAttribute = element.setAttribute;
+                element.setAttribute = function(name, value) {
+                  if (name === 'src' || name === 'href') {
+                    // Handle asset paths
+                    if (value && !value.startsWith('http') && !value.startsWith('data:')) {
+                      console.log('Intercepting asset:', value);
+                      // For now, let it load normally but log it
+                    }
+                  }
+                  return originalSetAttribute.call(this, name, value);
+                };
+              }
+              
+              return element;
+            };
+          }
+        };
+        
+        // Initialize asset handler
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', function() {
+            window.storylineAssetHandler.interceptAssetLoading();
+          });
+        } else {
+          window.storylineAssetHandler.interceptAssetLoading();
+        }
+      </script>
+    `;
+  };
+
+  const debugStorylineContent = async () => {
+    console.log('=== Debugging Storyline Content ===');
+    
+    if (!packageId) {
+      console.log('No packageId - cannot debug Storyline content');
+      return;
+    }
+    
+    try {
+      const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+      console.log('Package debug info:', debugInfo);
+      
+      // Look for Storyline-specific files
+      const storylineFiles = debugInfo.fileList.filter(f => 
+        f.includes('lms/scormdriver.js') ||
+        f.includes('story_content/') ||
+        f.includes('html5/') ||
+        f.includes('Articulate') ||
+        f.includes('Storyline')
+      );
+      
+      console.log('Storyline-specific files found:', storylineFiles);
+      
+      // Check for required Storyline assets
+      const requiredAssets = [
+        'lms/scormdriver.js',
+        'story_content/user.js',
+        'html5/data/css/output.min.css',
+        'html5/lib/scripts/bootstrapper.min.js'
+      ];
+      
+      const missingAssets = requiredAssets.filter(asset => 
+        !debugInfo.fileList.some(f => f.includes(asset))
+      );
+      
+      console.log('Missing required assets:', missingAssets);
+      
+      // Test loading the main HTML file
+      const htmlFiles = debugInfo.fileList.filter(f => 
+        f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+      );
+      
+      if (htmlFiles.length > 0) {
+        const mainFile = htmlFiles[0];
+        console.log('Testing main file:', mainFile);
+        
+        const blob = await SCORMPackageManager.getPackageFile(packageId, mainFile);
+        if (blob) {
+          const text = await blob.text();
+          console.log('Main file analysis:', {
+            size: blob.size,
+            textLength: text.length,
+            isStoryline: text.includes('Articulate') || text.includes('Storyline'),
+            hasScormDriver: text.includes('lms/scormdriver.js'),
+            hasStoryContent: text.includes('story_content/user.js'),
+            hasHtml5Assets: text.includes('html5/'),
+            hasBootstrapper: text.includes('bootstrapper.min.js')
+          });
+        }
+      }
+      
+      toast({
+        title: "Storyline Debug Complete",
+        description: `Found ${storylineFiles.length} Storyline files, ${missingAssets.length} missing assets`
+      });
+      
+    } catch (error) {
+      console.error('Storyline debug error:', error);
+      toast({
+        title: "Storyline Debug Failed",
+        description: error instanceof Error ? error.message : "Debug operation failed",
+        variant: "destructive"
+      });
     }
   };
 
@@ -812,6 +1509,136 @@ export function SCORMPlayer({
               </div>
             </div>
 
+            {/* Debug Info Collapsible Pane */}
+            <div className="border-b">
+              <Button
+                variant="ghost"
+                className="w-full justify-between p-3 text-sm"
+                onClick={() => setState(prev => ({ ...prev, showDebugInfo: !prev.showDebugInfo }))}
+              >
+                <span className="font-medium">SCORM Debug Info</span>
+                {state.showDebugInfo ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </Button>
+              
+              {state.showDebugInfo && (
+                <div className="px-3 pb-3 space-y-2 text-xs">
+                  <div className="bg-muted p-2 rounded">
+                    <div className="font-semibold mb-1">Current Content</div>
+                    <div>Playing: {currentItem?.title}</div>
+                    <div>File: {currentItem?.href}</div>
+                  </div>
+                  
+                  <div className="bg-muted p-2 rounded">
+                    <div className="font-semibold mb-1">API Status</div>
+                    <div className={cn(
+                      "inline-flex items-center gap-1 px-2 py-1 rounded text-xs",
+                      state.apiStatus === 'active' ? 'bg-green-100 text-green-800' : 
+                      state.apiStatus === 'connected' ? 'bg-yellow-100 text-yellow-800' : 
+                      'bg-red-100 text-red-800'
+                    )}>
+                      <div className={cn(
+                        "h-2 w-2 rounded-full",
+                        state.apiStatus === 'active' ? 'bg-green-500' : 
+                        state.apiStatus === 'connected' ? 'bg-yellow-500' : 
+                        'bg-red-500'
+                      )} />
+                      {state.apiStatus.toUpperCase()}
+                    </div>
+                    {state.lastApiCall && (
+                      <div className="mt-1 text-green-600">Last: {state.lastApiCall}</div>
+                    )}
+                  </div>
+                  
+                  <div className="bg-muted p-2 rounded">
+                    <div className="font-semibold mb-1">Session Data</div>
+                    <div>Time: {formatTime(state.sessionTime)}</div>
+                    <div>Score: {state.score || 'N/A'}</div>
+                    <div>Status: {state.lessonStatus}</div>
+                  </div>
+                  
+                  <div className="space-y-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={testSCORMConnection}
+                    >
+                      Test SCORM API
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={debugContentLoading}
+                    >
+                      Debug Content Loading
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={testContentLoading}
+                    >
+                      Test Content Loading
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={debugStorylineContent}
+                    >
+                      Debug Storyline Content
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={() => {
+                        if (iframeRef.current?.contentWindow) {
+                          try {
+                            (iframeRef.current.contentWindow as any).API = (window as any).API;
+                            (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
+                            (iframeRef.current.contentWindow as any).findAPI = (window as any).findAPI;
+                            (iframeRef.current.contentWindow as any).getAPI = (window as any).getAPI;
+                            
+                            console.log('✓ Manual API injection completed');
+                            setState(prev => ({ ...prev, apiStatus: 'connected' }));
+                            
+                            // Also trigger initialization
+                            const iframeAPI = (iframeRef.current.contentWindow as any).API;
+                            if (iframeAPI) {
+                              const initResult = iframeAPI.LMSInitialize('');
+                              if (initResult === 'true') {
+                                setState(prev => ({ ...prev, apiStatus: 'active' }));
+                                toast({
+                                  title: "API Activated",
+                                  description: "SCORM API injected and activated successfully"
+                                });
+                              } else {
+                                toast({
+                                  title: "API Injected",
+                                  description: "SCORM API injected but initialization failed"
+                                });
+                              }
+                            }
+                          } catch (e) {
+                            console.error('❌ Manual API injection failed:', e);
+                            toast({
+                              title: "Injection Failed",
+                              description: "Failed to inject SCORM API",
+                              variant: "destructive"
+                            });
+                          }
+                        }
+                      }}
+                    >
+                      Inject API Manually
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <ScrollArea className="flex-1 p-2">
               <div className="space-y-1">
                 {state.playableItems.map((item, index) => (
@@ -845,57 +1672,11 @@ export function SCORMPlayer({
         <div className="flex-1 flex flex-col relative">
           {currentItem ? (
             <div className="flex-1 bg-white relative">
-              {/* Enhanced Debug overlay */}
-              <div className="absolute top-0 left-0 bg-black text-white p-2 text-xs z-10 opacity-90 max-w-md">
-                <div className="font-bold mb-1">SCORM Debug Info</div>
-                <div>Playing: {currentItem.title}</div>
-                <div>File: {currentItem.href}</div>
-                <div className="mt-1">
-                  Status: <span className={state.apiStatus === 'active' ? 'text-green-400' : state.apiStatus === 'connected' ? 'text-yellow-400' : 'text-red-400'}>
-                    {state.apiStatus.toUpperCase()}
-                  </span>
-                </div>
-                {state.lastApiCall && (
-                  <div className="mt-1 text-green-400">Last API: {state.lastApiCall}</div>
-                )}
-                <div className="mt-1 text-blue-400">
-                  Session: {formatTime(state.sessionTime)}
-                </div>
-                <div className="mt-1 text-yellow-400">
-                  Score: {state.score || 'N/A'}
-                </div>
-                <div className="mt-2 space-y-1">
-                  <button 
-                    className="w-full px-2 py-1 bg-blue-600 text-white text-xs rounded"
-                    onClick={testSCORMConnection}
-                  >
-                    Test SCORM API
-                  </button>
-                  <button 
-                    className="w-full px-2 py-1 bg-green-600 text-white text-xs rounded"
-                    onClick={() => {
-                      if (iframeRef.current?.contentWindow) {
-                        (iframeRef.current.contentWindow as any).API = (window as any).API;
-                        (iframeRef.current.contentWindow as any).API_1484_11 = (window as any).API_1484_11;
-                        console.log('✓ Manual API injection completed');
-                        setState(prev => ({ ...prev, apiStatus: 'connected' }));
-                        toast({
-                          title: "API Injected",
-                          description: "SCORM API manually injected into iframe"
-                        });
-                      }
-                    }}
-                  >
-                    Inject API Manually
-                  </button>
-                </div>
-              </div>
-              
               <iframe
                 ref={iframeRef}
                 title={DOMPurify.sanitize(currentItem.title, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] })}
                 className="w-full h-full border-0 bg-white"
-                sandbox="allow-scripts allow-forms allow-modals allow-same-origin"
+                sandbox="allow-scripts allow-forms allow-modals allow-same-origin allow-popups allow-top-navigation allow-downloads"
                 style={{ 
                   minHeight: '600px',
                   width: '100%',
