@@ -73,3 +73,13 @@ The application follows a standard React SPA architecture with the following key
 - ESLint is configured for code quality checks
 - The application was initially created with Lovable.dev
 - All SCORM content is served from the public directory after extraction
+
+### Important Rules
+
+#### Samples Folder - Reference Only
+The `/Samples/` folder contains reference SCORM content that is **NOT** part of this project and should **NEVER** be altered:
+
+- **RuntimeMinimumCalls_SCORM12/**: Official SCORM 1.2 reference content from the organization responsible for SCORM standards
+- **Computer and Technology Literacy_Demonstrating Computer and Technology Literacy/**: Complex SCORM content example for reference purposes
+
+**Rule**: These samples are provided for reference and testing purposes only. They must remain unchanged to preserve their integrity as reference materials. Any modifications to these files are strictly prohibited.

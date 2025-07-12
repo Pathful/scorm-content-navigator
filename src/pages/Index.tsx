@@ -83,16 +83,16 @@ const Index = () => {
                   <div className="bg-blue-600 rounded-lg p-3 w-fit mb-4">
                     <Package className="h-8 w-8 text-white" />
                   </div>
-                  <h3 className="text-xl font-semibold mb-3">Test & Preview</h3>
+                  <h3 className="text-xl font-semibold mb-3">Manage Packages</h3>
                   <p className="text-slate-600 mb-4">
-                    Preview SCORM content in a secure environment before deploying to production iframes
+                    View, test, and manage uploaded SCORM packages in the package manager
                   </p>
                   <Button 
                     variant="outline"
-                    onClick={() => navigate('/player/demo')}
+                    onClick={() => navigate('/packages')}
                     className="w-full border-blue-600 text-blue-600 hover:bg-blue-600 hover:text-white"
                   >
-                    Launch Preview Mode
+                    Package Manager
                   </Button>
                 </div>
               </Card>

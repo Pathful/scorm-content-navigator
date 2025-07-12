@@ -26,6 +26,10 @@ import { useToast } from '@/hooks/use-toast';
 import { SCORMAgainAdapter } from '@/lib/scorm-again-adapter';
 import { SCORMManifestParser, type SCORMManifest, type SCORMItem } from '@/lib/scorm-manifest';
 import { SCORMPackageManager } from '@/lib/scorm-package-manager';
+import { rewriteSCORMUrls, extractAssetUrls } from '@/lib/scorm-url-rewriter';
+import { handleAssetRequest, debugPackageAssets } from '@/lib/scorm-asset-handler';
+import { testMockSCORMAPI } from '@/lib/mock-scorm-api';
+import { testURLRewriting, testURLRewritingWithPackage, testPathResolution } from '@/lib/test-url-rewriting';
 
 interface SCORMPlayerProps {
   manifestUrl?: string;
@@ -52,10 +56,10 @@ interface PlayerState {
 }
 
 export function SCORMPlayer({ 
-  manifestUrl = '/demo/imsmanifest.xml',
-  baseUrl = '/demo/',
-  userId = 'demo_user',
-  courseId = 'demo_course',
+  manifestUrl,
+  baseUrl,
+  userId = 'user',
+  courseId = 'course',
   packageId,
   className 
 }: SCORMPlayerProps) {
@@ -97,29 +101,34 @@ export function SCORMPlayer({
     
     // Track initialization state to prevent double initialization
     let isInitialized = false;
+    let sessionActive = false;
     
-    // Wrap API methods to track activity
+    // Enhanced SCORM 1.2 API implementation with full compliance
     const wrappedAPI = {
       LMSInitialize: (param: string) => {
-        console.log('SCORM: LMSInitialize called');
-        if (isInitialized) {
-          console.log('SCORM: Already initialized, returning false');
+        console.log('SCORM: LMSInitialize called with param:', param);
+        if (isInitialized && sessionActive) {
+          console.log('SCORM: Already initialized and session active, returning false per SCORM 1.2 spec');
           setState(prev => ({ ...prev, lastApiCall: 'LMSInitialize (already initialized)' }));
-          return 'false'; // ✅ Return 'false' per SCORM spec
+          return 'false'; // ✅ Return 'false' per SCORM 1.2 spec
         }
         setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: 'LMSInitialize' }));
         const result = API.lmsInitialize();
         if (result === 'true') {
           isInitialized = true;
+          sessionActive = true;
+          console.log('✓ SCORM 1.2 session initialized successfully');
         }
         return result;
       },
       LMSFinish: (param: string) => {
-        console.log('SCORM: LMSFinish called');
+        console.log('SCORM: LMSFinish called with param:', param);
         setState(prev => ({ ...prev, apiStatus: 'connected', lastApiCall: 'LMSFinish' }));
         const result = API.lmsFinish();
         if (result === 'true') {
           isInitialized = false; // Reset initialization state
+          sessionActive = false; // Reset session state
+          console.log('✓ SCORM 1.2 session terminated successfully');
         }
         return result;
       },
@@ -127,11 +136,13 @@ export function SCORMPlayer({
         console.log(`SCORM: LMSGetValue("${element}")`);
         setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: `LMSGetValue: ${element}` }));
         
-        // Add validation for required elements
+        // SCORM 1.2 validation for required elements
         if (!element || typeof element !== 'string') {
+          console.warn('⚠ LMSGetValue: Invalid element parameter');
           return '';
         }
         
+        // Handle special SCORM 1.2 elements
         const value = API.lmsGetValue(element);
         
         // Update UI based on values
@@ -147,6 +158,17 @@ export function SCORMPlayer({
         console.log(`SCORM: LMSSetValue("${element}", "${value}")`);
         setState(prev => ({ ...prev, apiStatus: 'active', lastApiCall: `LMSSetValue: ${element}` }));
         
+        // SCORM 1.2 validation
+        if (!element || typeof element !== 'string') {
+          console.warn('⚠ LMSSetValue: Invalid element parameter');
+          return 'false';
+        }
+        
+        if (value === undefined || value === null) {
+          console.warn('⚠ LMSSetValue: Invalid value parameter');
+          return 'false';
+        }
+        
         // Update UI based on values
         if (element === 'cmi.core.lesson_status') {
           setState(prev => ({ ...prev, lessonStatus: value }));
@@ -154,23 +176,64 @@ export function SCORMPlayer({
           setState(prev => ({ ...prev, score: value }));
         }
         
-        return API.lmsSetValue(element, value);
+        const result = API.lmsSetValue(element, value);
+        return result;
       },
       LMSCommit: (param: string) => {
-        console.log('SCORM: LMSCommit called');
+        console.log('SCORM: LMSCommit called with param:', param);
         setState(prev => ({ ...prev, lastApiCall: 'LMSCommit' }));
-        return API.lmsCommit();
+        const result = API.lmsCommit();
+        return result;
       },
-      LMSGetLastError: () => API.lmsGetLastError(),
-      LMSGetErrorString: (errorCode: string) => API.lmsGetErrorString(errorCode),
-      LMSGetDiagnostic: (errorCode: string) => API.lmsGetDiagnostic(errorCode)
+      LMSGetLastError: () => {
+        const error = API.lmsGetLastError();
+        console.log('SCORM: LMSGetLastError returned:', error);
+        return error;
+      },
+      LMSGetErrorString: (errorCode: string) => {
+        const errorString = API.lmsGetErrorString(errorCode);
+        console.log(`SCORM: LMSGetErrorString("${errorCode}") returned:`, errorString);
+        return errorString;
+      },
+      LMSGetDiagnostic: (errorCode: string) => {
+        const diagnostic = API.lmsGetDiagnostic(errorCode);
+        console.log(`SCORM: LMSGetDiagnostic("${errorCode}") returned:`, diagnostic);
+        return diagnostic;
+      }
+    };
+    
+    // Enhanced SCORM 2004 API for compatibility
+    const wrappedAPI_1484_11 = {
+      Initialize: (param: string) => {
+        console.log('SCORM 2004: Initialize called with param:', param);
+        return wrappedAPI.LMSInitialize(param);
+      },
+      Terminate: (param: string) => {
+        console.log('SCORM 2004: Terminate called with param:', param);
+        return wrappedAPI.LMSFinish(param);
+      },
+      GetValue: (element: string) => {
+        console.log(`SCORM 2004: GetValue("${element}")`);
+        return wrappedAPI.LMSGetValue(element);
+      },
+      SetValue: (element: string, value: string) => {
+        console.log(`SCORM 2004: SetValue("${element}", "${value}")`);
+        return wrappedAPI.LMSSetValue(element, value);
+      },
+      Commit: (param: string) => {
+        console.log('SCORM 2004: Commit called with param:', param);
+        return wrappedAPI.LMSCommit(param);
+      },
+      GetLastError: () => wrappedAPI.LMSGetLastError(),
+      GetErrorString: (errorCode: string) => wrappedAPI.LMSGetErrorString(errorCode),
+      GetDiagnostic: (errorCode: string) => wrappedAPI.LMSGetDiagnostic(errorCode)
     };
     
     // Make APIs globally available immediately
     (window as any).API = wrappedAPI;
-    (window as any).API_1484_11 = API_1484_11;
+    (window as any).API_1484_11 = wrappedAPI_1484_11;
     
-    // Also expose common SCORM API discovery functions
+    // Enhanced SCORM API discovery functions per ADL specification
     (window as any).findAPI = (win: any) => {
       let findAttempts = 0;
       while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
@@ -188,7 +251,7 @@ export function SCORMPlayer({
       return (window as any).API || (window as any).findAPI(window);
     };
 
-    console.log('SCORM APIs initialized and available globally');
+    console.log('✓ SCORM 1.2 APIs initialized and available globally');
 
     loadManifest();
 
@@ -223,20 +286,16 @@ export function SCORMPlayer({
     try {
       setState(prev => ({ ...prev, isLoading: true }));
       
-      let manifest: SCORMManifest;
-      
-      // If packageId is provided, load the actual uploaded package
-      if (packageId) {
-        const scormPackage = await SCORMPackageManager.getPackageById(packageId);
-        if (!scormPackage) {
-          throw new Error(`Package with ID ${packageId} not found`);
-        }
-        manifest = scormPackage.manifest;
-      } else {
-        // For demo purposes, create a sample manifest
-        manifest = createDemoManifest();
+      if (!packageId) {
+        throw new Error('No package ID provided. Please provide a valid SCORM package ID.');
       }
       
+      const scormPackage = await SCORMPackageManager.getPackageById(packageId);
+      if (!scormPackage) {
+        throw new Error(`Package with ID ${packageId} not found`);
+      }
+      
+      const manifest = scormPackage.manifest;
       const resolvedManifest = SCORMManifestParser.resolveItemResources(manifest);
       const playableItems = SCORMManifestParser.getPlayableItems(resolvedManifest);
       
@@ -270,63 +329,18 @@ export function SCORMPlayer({
     }
   };
 
-  const createDemoManifest = (): SCORMManifest => {
-    return {
-      identifier: "demo_course",
-      version: "1.0",
-      title: "Demo SCORM Course",
-      defaultOrganization: "demo_org",
-      organizations: [{
-        identifier: "demo_org",
-        title: "Course Organization",
-        items: [
-          {
-            identifier: "lesson1",
-            title: "Introduction to SCORM",
-            href: "lesson1.html",
-            isVisible: true,
-            children: []
-          },
-          {
-            identifier: "lesson2", 
-            title: "SCORM API Implementation",
-            href: "lesson2.html",
-            isVisible: true,
-            children: []
-          },
-          {
-            identifier: "quiz1",
-            title: "Knowledge Check",
-            href: "quiz.html",
-            isVisible: true,
-            children: []
-          }
-        ]
-      }],
-      resources: [
-        {
-          identifier: "lesson1",
-          type: "webcontent",
-          href: "lesson1.html",
-          files: ["lesson1.html"]
-        },
-        {
-          identifier: "lesson2",
-          type: "webcontent", 
-          href: "lesson2.html",
-          files: ["lesson2.html"]
-        },
-        {
-          identifier: "quiz1",
-          type: "webcontent",
-          href: "quiz.html", 
-          files: ["quiz.html"]
-        }
-      ]
-    };
-  };
+
 
   const loadSCO = useCallback(async (itemIndex: number) => {
+    if (!packageId) {
+      toast({
+        title: "No SCORM Package",
+        description: "Please provide a valid SCORM package ID to load content",
+        variant: "destructive"
+      });
+      return;
+    }
+    
     console.log('=== loadSCO called ===');
     console.log('Item index:', itemIndex);
     console.log('Playable items:', state.playableItems);
@@ -393,6 +407,10 @@ export function SCORMPlayer({
           if (item.href.toLowerCase().includes('.html') || item.href.toLowerCase().includes('.htm')) {
             const text = await contentBlob.text();
             
+            // Extract and log asset URLs for debugging
+            const assetUrls = extractAssetUrls(text);
+            console.log('Found assets in HTML:', assetUrls);
+            
             // Check if this is Articulate Storyline content
             const isStorylineContent = text.includes('Articulate') || 
                                      text.includes('Storyline') || 
@@ -401,20 +419,20 @@ export function SCORMPlayer({
             
             console.log('Content type detected:', isStorylineContent ? 'Storyline' : 'Standard HTML');
             
-            // Enhanced SCORM API injection with better error handling
+            // Enhanced SCORM 1.2 API injection with full compliance
             const scormApiScript = `
               <script>
-                // Enhanced SCORM API injection
-                console.log('SCORM API injection starting...');
+                // Enhanced SCORM 1.2 API injection
+                console.log('SCORM 1.2 API injection starting...');
                 
                 // Make APIs available immediately
                 if (window.parent && window.parent.API) {
                   window.API = window.parent.API;
                   window.API_1484_11 = window.parent.API_1484_11;
-                  console.log("✓ SCORM API injected from parent");
+                  console.log("✓ SCORM 1.2 API injected from parent");
                 }
                 
-                // Standard SCORM API discovery
+                // Standard SCORM API discovery per ADL specification
                 window.findAPI = function(win) {
                   var findAttempts = 0;
                   while ((win.API == null) && (win.parent != null) && (win.parent != win)) {
@@ -432,28 +450,34 @@ export function SCORMPlayer({
                   return window.API || window.findAPI(window);
                 };
                 
-                // Auto-initialize SCORM when page loads
+                // Auto-initialize SCORM 1.2 when page loads
                 function initializeSCORM() {
                   try {
                     const api = window.getAPI();
                     if (api) {
-                      console.log('Initializing SCORM session...');
+                      console.log('Initializing SCORM 1.2 session...');
                       const initResult = api.LMSInitialize('');
                       console.log('LMSInitialize result:', initResult);
                       
                       if (initResult === 'true') {
-                        console.log('✓ SCORM session initialized successfully');
-                        // Set initial status
+                        console.log('✓ SCORM 1.2 session initialized successfully');
+                        // Set initial status per SCORM 1.2 spec
                         api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                         api.LMSCommit('');
                       } else {
-                        console.warn('⚠ SCORM initialization returned false');
+                        console.warn('⚠ SCORM 1.2 initialization returned false');
+                        // Check for errors
+                        const errorCode = api.LMSGetLastError();
+                        if (errorCode !== '0') {
+                          const errorString = api.LMSGetErrorString(errorCode);
+                          console.error('SCORM 1.2 initialization error:', errorCode, errorString);
+                        }
                       }
                     } else {
-                      console.warn('⚠ SCORM API not available for initialization');
+                      console.warn('⚠ SCORM 1.2 API not available for initialization');
                     }
                   } catch (e) {
-                    console.error('❌ SCORM initialization failed:', e);
+                    console.error('❌ SCORM 1.2 initialization failed:', e);
                   }
                 }
                 
@@ -464,7 +488,36 @@ export function SCORMPlayer({
                   initializeSCORM();
                 }
                 
-                console.log('✓ SCORM API injection completed');
+                // Handle page unload for proper SCORM 1.2 termination
+                function terminateSCORM() {
+                  try {
+                    const api = window.getAPI();
+                    if (api) {
+                      console.log('Terminating SCORM 1.2 session...');
+                      const finishResult = api.LMSFinish('');
+                      console.log('LMSFinish result:', finishResult);
+                      
+                      if (finishResult === 'true') {
+                        console.log('✓ SCORM 1.2 session terminated successfully');
+                      } else {
+                        console.warn('⚠ SCORM 1.2 termination returned false');
+                        const errorCode = api.LMSGetLastError();
+                        if (errorCode !== '0') {
+                          const errorString = api.LMSGetErrorString(errorCode);
+                          console.error('SCORM 1.2 termination error:', errorCode, errorString);
+                        }
+                      }
+                    }
+                  } catch (e) {
+                    console.error('❌ SCORM 1.2 termination failed:', e);
+                  }
+                }
+                
+                // Set up unload handlers
+                window.addEventListener('beforeunload', terminateSCORM);
+                window.addEventListener('unload', terminateSCORM);
+                
+                console.log('✓ SCORM 1.2 API injection completed');
               </script>
             `;
             
@@ -479,14 +532,14 @@ export function SCORMPlayer({
               // 1. Ensure SCORM API is available before any other scripts
               const storylineApiScript = `
                 <script>
-                  // Storyline-specific SCORM API injection
-                  console.log('Storyline SCORM API injection starting...');
+                  // Storyline-specific SCORM 1.2 API injection
+                  console.log('Storyline SCORM 1.2 API injection starting...');
                   
                   // Make APIs available immediately for Storyline
                   if (window.parent && window.parent.API) {
                     window.API = window.parent.API;
                     window.API_1484_11 = window.parent.API_1484_11;
-                    console.log("✓ Storyline SCORM API injected from parent");
+                    console.log("✓ Storyline SCORM 1.2 API injected from parent");
                   }
                   
                   // Standard SCORM API discovery for Storyline
@@ -512,33 +565,33 @@ export function SCORMPlayer({
                     try {
                       const api = window.getAPI();
                       if (api) {
-                        console.log('Initializing Storyline SCORM session...');
+                        console.log('Initializing Storyline SCORM 1.2 session...');
                         
                         // Storyline often needs multiple initialization attempts
                         let initResult = api.LMSInitialize('');
                         console.log('Storyline LMSInitialize result:', initResult);
                         
                         if (initResult === 'true') {
-                          console.log('✓ Storyline SCORM session initialized successfully');
+                          console.log('✓ Storyline SCORM 1.2 session initialized successfully');
                           // Set initial status for Storyline
                           api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                           api.LMSCommit('');
                         } else {
-                          console.warn('⚠ Storyline SCORM initialization returned false, retrying...');
+                          console.warn('⚠ Storyline SCORM 1.2 initialization returned false, retrying...');
                           
                           // Retry with a delay - Storyline sometimes needs time to fully load
                           setTimeout(() => {
                             try {
-                              console.log('Retrying Storyline SCORM initialization...');
+                              console.log('Retrying Storyline SCORM 1.2 initialization...');
                               const retryResult = api.LMSInitialize('');
                               console.log('Storyline retry result:', retryResult);
                               
                               if (retryResult === 'true') {
-                                console.log('✓ Storyline SCORM session initialized on retry');
+                                console.log('✓ Storyline SCORM 1.2 session initialized on retry');
                                 api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                                 api.LMSCommit('');
                               } else {
-                                console.warn('⚠ Storyline SCORM retry also failed, trying alternative approach...');
+                                console.warn('⚠ Storyline SCORM 1.2 retry also failed, trying alternative approach...');
                                 
                                 // Try alternative initialization approach for Storyline
                                 setTimeout(() => {
@@ -548,11 +601,11 @@ export function SCORMPlayer({
                                     console.log('Storyline alternative init result:', altResult);
                                     
                                     if (altResult === 'true') {
-                                      console.log('✓ Storyline SCORM session initialized with alternative method');
+                                      console.log('✓ Storyline SCORM 1.2 session initialized with alternative method');
                                       api.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                                       api.LMSCommit('');
                                     } else {
-                                      console.error('❌ All Storyline SCORM initialization attempts failed');
+                                      console.error('❌ All Storyline SCORM 1.2 initialization attempts failed');
                                     }
                                   } catch (e) {
                                     console.error('❌ Alternative Storyline initialization failed:', e);
@@ -560,22 +613,22 @@ export function SCORMPlayer({
                                 }, 1000);
                               }
                             } catch (e) {
-                              console.error('❌ Storyline SCORM retry failed:', e);
+                              console.error('❌ Storyline SCORM 1.2 retry failed:', e);
                             }
                           }, 2000); // Longer delay for Storyline
                         }
                       } else {
-                        console.warn('⚠ Storyline SCORM API not available for initialization');
+                        console.warn('⚠ Storyline SCORM 1.2 API not available for initialization');
                         
                         // Try to find API using alternative methods
                         setTimeout(() => {
                           try {
                             const foundAPI = window.findAPI(window);
                             if (foundAPI) {
-                              console.log('✓ Found Storyline SCORM API via alternative method');
+                              console.log('✓ Found Storyline SCORM 1.2 API via alternative method');
                               initializeStorylineSCORM();
                             } else {
-                              console.error('❌ Storyline SCORM API not found via any method');
+                              console.error('❌ Storyline SCORM 1.2 API not found via any method');
                             }
                           } catch (e) {
                             console.error('❌ Alternative API discovery failed:', e);
@@ -583,7 +636,7 @@ export function SCORMPlayer({
                         }, 1000);
                       }
                     } catch (e) {
-                      console.error('❌ Storyline SCORM initialization failed:', e);
+                      console.error('❌ Storyline SCORM 1.2 initialization failed:', e);
                     }
                   }
                   
@@ -595,7 +648,7 @@ export function SCORMPlayer({
                     setTimeout(initializeStorylineSCORM, 1000);
                   }
                   
-                  console.log('✓ Storyline SCORM API injection completed');
+                  console.log('✓ Storyline SCORM 1.2 API injection completed');
                 </script>
               `;
               
@@ -623,10 +676,46 @@ export function SCORMPlayer({
               }
             }
             
+            // Rewrite all asset URLs to point to our asset handler
+            console.log('Rewriting asset URLs...');
+            const rewrittenHtml = rewriteSCORMUrls(modifiedHtml, {
+              packageId,
+              baseUrl: window.location.origin,
+              currentFilePath: item.href
+            });
+            
             // Create blob URL for the modified HTML
-            const htmlBlob = new Blob([modifiedHtml], { type: 'text/html; charset=utf-8' });
+            const htmlBlob = new Blob([rewrittenHtml], { type: 'text/html; charset=utf-8' });
             contentUrl = URL.createObjectURL(htmlBlob);
-            console.log('✓ HTML content prepared with SCORM API injection');
+            console.log('✓ HTML content prepared with SCORM 1.2 API injection and URL rewriting');
+            
+            // Also inject fetch override into the HTML content itself
+            const htmlWithFetchOverride = rewrittenHtml.replace(
+              /<head([^>]*)>/i,
+              `<head$1>
+                <script>
+                  // Override fetch to intercept SCORM asset requests
+                  const originalFetch = window.fetch;
+                  window.fetch = async function(input, init) {
+                    const url = typeof input === 'string' ? input : input.toString();
+                    console.log('Iframe fetch called with URL:', url);
+                    if (url.includes('/api/scorm-asset')) {
+                      console.log('Iframe: Intercepting SCORM asset request to:', url);
+                      // Use the parent window's fetch to ensure it goes through our mock API
+                      if (window.parent && window.parent.fetch) {
+                        console.log('Iframe: Using parent window fetch for SCORM asset');
+                        return window.parent.fetch(input, init);
+                      }
+                    }
+                    return originalFetch(input, init);
+                  };
+                  console.log('✓ Iframe fetch override installed');
+                </script>
+              `
+            );
+            
+            const finalHtmlBlob = new Blob([htmlWithFetchOverride], { type: 'text/html; charset=utf-8' });
+            contentUrl = URL.createObjectURL(finalHtmlBlob);
           } else {
             // For non-HTML files, serve directly
             contentUrl = URL.createObjectURL(contentBlob);
@@ -651,17 +740,26 @@ export function SCORMPlayer({
                   if (window.parent && window.parent.API) {
                     window.API = window.parent.API;
                     window.API_1484_11 = window.parent.API_1484_11;
-                    console.log("✓ SCORM API injected (fallback)");
+                    console.log("✓ SCORM 1.2 API injected (fallback)");
                   }
                 </script>
               `;
-              const modifiedHtml = text.replace(
+              let modifiedHtml = text.replace(
                 /<head([^>]*)>/i,
                 `<head$1>${scormApiScript}`
               );
-              const htmlBlob = new Blob([modifiedHtml], { type: 'text/html; charset=utf-8' });
+              
+              // Rewrite asset URLs for fallback HTML as well
+              console.log('Rewriting asset URLs in fallback HTML...');
+              const rewrittenHtml = rewriteSCORMUrls(modifiedHtml, {
+                packageId,
+                baseUrl: window.location.origin,
+                currentFilePath: htmlFiles[0]
+              });
+              
+              const htmlBlob = new Blob([rewrittenHtml], { type: 'text/html; charset=utf-8' });
               contentUrl = URL.createObjectURL(htmlBlob);
-              console.log('✓ Using fallback HTML file');
+              console.log('✓ Using fallback HTML file with URL rewriting');
             } else {
               throw new Error(`Content file "${item.href}" not found in package. Available files: ${debugInfo.fileList.join(', ')}`);
             }
@@ -669,11 +767,6 @@ export function SCORMPlayer({
             throw new Error(`Content file "${item.href}" not found in package. No HTML files available. Available files: ${debugInfo.fileList.join(', ')}`);
           }
         }
-      } else {
-        // Create demo content for demo mode
-        const demoContent = createDemoContent(item);
-        const blob = new Blob([demoContent], { type: 'text/html' });
-        contentUrl = URL.createObjectURL(blob);
       }
 
       setState(prev => ({
@@ -718,7 +811,15 @@ export function SCORMPlayer({
               (iframeRef.current.contentWindow as any).findAPI = (window as any).findAPI;
               (iframeRef.current.contentWindow as any).getAPI = (window as any).getAPI;
               
-              console.log('✓ SCORM APIs injected immediately');
+              // Also inject the fetch override into the iframe
+              (iframeRef.current.contentWindow as any).fetch = window.fetch;
+              
+              // Debug: Check if fetch override is working
+              console.log('✓ Fetch override injected into iframe');
+              console.log('Iframe fetch function:', (iframeRef.current.contentWindow as any).fetch);
+              console.log('Parent fetch function:', window.fetch);
+              
+              console.log('✓ SCORM 1.2 APIs injected immediately');
               setState(prev => ({ ...prev, apiStatus: 'connected' }));
               
               // Trigger initial SCORM session with retry logic
@@ -727,42 +828,42 @@ export function SCORMPlayer({
                   if (iframeRef.current?.contentWindow) {
                     const iframeAPI = (iframeRef.current.contentWindow as any).API;
                     if (iframeAPI) {
-                      console.log('Triggering initial SCORM session...');
+                      console.log('Triggering initial SCORM 1.2 session...');
                       const initResult = iframeAPI.LMSInitialize('');
                       console.log('Initial LMSInitialize result:', initResult);
                       
                       if (initResult === 'true') {
                         setState(prev => ({ ...prev, apiStatus: 'active' }));
-                        console.log('✓ SCORM session activated');
+                        console.log('✓ SCORM 1.2 session activated');
                         
-                        // Set initial status
+                        // Set initial status per SCORM 1.2 spec
                         iframeAPI.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                         iframeAPI.LMSCommit('');
                       } else {
-                        console.warn('⚠ SCORM initialization returned false, will retry...');
+                        console.warn('⚠ SCORM 1.2 initialization returned false, will retry...');
                         // Retry with longer delay
                         setTimeout(() => {
                           try {
                             const retryResult = iframeAPI.LMSInitialize('');
                             if (retryResult === 'true') {
                               setState(prev => ({ ...prev, apiStatus: 'active' }));
-                              console.log('✓ SCORM session activated on retry');
+                              console.log('✓ SCORM 1.2 session activated on retry');
                               iframeAPI.LMSSetValue('cmi.core.lesson_status', 'incomplete');
                               iframeAPI.LMSCommit('');
                             }
                           } catch (e) {
-                            console.error('❌ SCORM retry failed:', e);
+                            console.error('❌ SCORM 1.2 retry failed:', e);
                           }
                         }, 1000);
                       }
                     }
                   }
                 } catch (e) {
-                  console.error('❌ Failed to initialize SCORM session:', e);
+                  console.error('❌ Failed to initialize SCORM 1.2 session:', e);
                 }
               }, 200); // Increased delay to ensure content is ready
             } catch (e) {
-              console.error('❌ Failed to inject SCORM API:', e);
+              console.error('❌ Failed to inject SCORM 1.2 API:', e);
               setState(prev => ({ ...prev, apiStatus: 'disconnected' }));
             }
           }
@@ -792,7 +893,7 @@ export function SCORMPlayer({
         variant: "destructive"
       });
     }
-  }, [state.playableItems, packageId, toast]);
+  }, [packageId, state.playableItems, toast]);
 
   const validateContentSecurity = (content: string): boolean => {
     // Basic security checks
@@ -806,176 +907,7 @@ export function SCORMPlayer({
     return !suspiciousPatterns.some(pattern => pattern.test(content));
   };
 
-  const createDemoContent = (item: SCORMItem): string => {
-    // Sanitize the title to prevent XSS
-    const sanitizedTitle = DOMPurify.sanitize(item.title, { 
-      ALLOWED_TAGS: [], 
-      ALLOWED_ATTR: [] 
-    });
-    
-    return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>${sanitizedTitle}</title>
-        <style>
-            body { 
-                font-family: system-ui, -apple-system, sans-serif; 
-                padding: 40px; 
-                line-height: 1.6;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                min-height: 100vh;
-                margin: 0;
-            }
-            .content {
-                background: rgba(255,255,255,0.1);
-                padding: 30px;
-                border-radius: 15px;
-                backdrop-filter: blur(10px);
-                max-width: 800px;
-                margin: 0 auto;
-            }
-            .complete-btn {
-                background: #4CAF50;
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 16px;
-                margin-top: 20px;
-            }
-            .complete-btn:hover {
-                background: #45a049;
-            }
-            .progress-indicator {
-                background: rgba(255,255,255,0.2);
-                height: 6px;
-                border-radius: 3px;
-                margin: 20px 0;
-            }
-            .progress-bar {
-                background: #4CAF50;
-                height: 100%;
-                border-radius: 3px;
-                width: 0%;
-                transition: width 0.3s;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="content">
-            <h1>${sanitizedTitle}</h1>
-            <div class="progress-indicator">
-                <div id="progressBar" class="progress-bar"></div>
-            </div>
-            <p>Welcome to this SCORM demonstration. This content is communicating with the SCORM API.</p>
-            <p><strong>Current Status:</strong> <span id="status">Incomplete</span></p>
-            <p><strong>Session Time:</strong> <span id="sessionTime">00:00:00</span></p>
-            
-            <h2>Learning Content</h2>
-            <p>This is a sample SCORM content object that demonstrates:</p>
-            <ul>
-                <li>SCORM API communication</li>
-                <li>Progress tracking</li>
-                <li>Score reporting</li>
-                <li>Session management</li>
-            </ul>
-            
-            <button class="complete-btn" onclick="completeLesson()">Mark as Complete</button>
-        </div>
 
-        <script>
-            let startTime = new Date();
-            let progress = 0;
-            
-            function updateProgress() {
-                progress += 10;
-                document.getElementById('progressBar').style.width = progress + '%';
-                
-                if (window.API) {
-                    try {
-                        window.API.LMSSetValue('cmi.core.score.raw', progress.toString());
-                        window.API.LMSCommit('');
-                    } catch (e) {
-                        console.error('❌ Failed to update progress:', e);
-                    }
-                }
-            }
-            
-            function updateSessionTime() {
-                const elapsed = Math.floor((new Date() - startTime) / 1000);
-                const hours = Math.floor(elapsed / 3600).toString().padStart(2, '0');
-                const minutes = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
-                const seconds = (elapsed % 60).toString().padStart(2, '0');
-                
-                document.getElementById('sessionTime').textContent = hours + ':' + minutes + ':' + seconds;
-                
-                if (window.API) {
-                    try {
-                        window.API.LMSSetValue('cmi.core.session_time', hours + ':' + minutes + ':' + seconds);
-                    } catch (e) {
-                        console.error('❌ Failed to update session time:', e);
-                    }
-                }
-            }
-            
-            function completeLesson() {
-                if (window.API) {
-                    try {
-                        window.API.LMSSetValue('cmi.core.lesson_status', 'completed');
-                        window.API.LMSSetValue('cmi.core.score.raw', '100');
-                        window.API.LMSCommit('');
-                        window.API.LMSFinish('');
-                        console.log('✓ Lesson completed successfully via SCORM API');
-                    } catch (e) {
-                        console.error('❌ Failed to complete lesson via SCORM API:', e);
-                    }
-                }
-                
-                document.getElementById('status').textContent = 'Completed';
-                document.getElementById('progressBar').style.width = '100%';
-                alert('Lesson completed successfully!');
-            }
-            
-            // Initialize SCORM
-            function initializeSCORM() {
-                if (window.API) {
-                    try {
-                        console.log('Initializing SCORM session...');
-                        const initResult = window.API.LMSInitialize('');
-                        console.log('LMSInitialize result:', initResult);
-                        
-                        if (initResult === 'true') {
-                            window.API.LMSSetValue('cmi.core.lesson_status', 'incomplete');
-                            console.log('✓ SCORM session initialized successfully');
-                        } else {
-                            console.warn('⚠ SCORM initialization returned false');
-                        }
-                    } catch (e) {
-                        console.error('❌ SCORM initialization failed:', e);
-                    }
-                } else {
-                    console.warn('⚠ SCORM API not available for initialization');
-                }
-            }
-            
-            // Initialize when page loads
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', initializeSCORM);
-            } else {
-                initializeSCORM();
-            }
-            
-            // Update progress and time periodically
-            setInterval(updateProgress, 2000);
-            setInterval(updateSessionTime, 1000);
-        </script>
-    </body>
-    </html>
-    `;
-  };
 
   const navigateToItem = (index: number) => {
     if (index >= 0 && index < state.playableItems.length) {
@@ -991,11 +923,11 @@ export function SCORMPlayer({
   };
 
   const testSCORMConnection = () => {
-    console.log('=== Testing SCORM Connection ===');
+    console.log('=== Testing SCORM 1.2 Connection ===');
     
     // Test window API
     if ((window as any).API) {
-      console.log('✓ Window API available');
+      console.log('✓ Window SCORM 1.2 API available');
       try {
         const initResult = (window as any).API.LMSInitialize('');
         console.log('✓ LMSInitialize result:', initResult);
@@ -1003,8 +935,14 @@ export function SCORMPlayer({
         const studentName = (window as any).API.LMSGetValue('cmi.core.student_name');
         console.log('✓ Student name:', studentName);
         
+        const lessonStatus = (window as any).API.LMSGetValue('cmi.core.lesson_status');
+        console.log('✓ Lesson status:', lessonStatus);
+        
         const setResult = (window as any).API.LMSSetValue('cmi.core.lesson_status', 'incomplete');
         console.log('✓ LMSSetValue result:', setResult);
+        
+        const commitResult = (window as any).API.LMSCommit('');
+        console.log('✓ LMSCommit result:', commitResult);
         
         (window as any).API.LMSFinish('');
         console.log('✓ LMSFinish completed');
@@ -1012,22 +950,22 @@ export function SCORMPlayer({
         // Update UI status to active
         setState(prev => ({ ...prev, apiStatus: 'active' }));
         toast({
-          title: "SCORM Test Successful",
-          description: "All SCORM API calls completed successfully"
+          title: "SCORM 1.2 Test Successful",
+          description: "All SCORM 1.2 API calls completed successfully"
         });
       } catch (e) {
-        console.error('❌ Window API test failed:', e);
+        console.error('❌ Window SCORM 1.2 API test failed:', e);
         toast({
-          title: "SCORM Test Failed",
-          description: "Error testing SCORM API calls",
+          title: "SCORM 1.2 Test Failed",
+          description: "Error testing SCORM 1.2 API calls",
           variant: "destructive"
         });
       }
     } else {
-      console.log('❌ Window API not available');
+      console.log('❌ Window SCORM 1.2 API not available');
       toast({
-        title: "SCORM API Not Available",
-        description: "Window SCORM API is not accessible",
+        title: "SCORM 1.2 API Not Available",
+        description: "Window SCORM 1.2 API is not accessible",
         variant: "destructive"
       });
     }
@@ -1038,7 +976,7 @@ export function SCORMPlayer({
       try {
         const iframeAPI = (iframeRef.current.contentWindow as any).API;
         if (iframeAPI) {
-          console.log('✓ Iframe API available');
+          console.log('✓ Iframe SCORM 1.2 API available');
           const initResult = iframeAPI.LMSInitialize('');
           console.log('✓ Iframe LMSInitialize result:', initResult);
           
@@ -1046,10 +984,10 @@ export function SCORMPlayer({
             setState(prev => ({ ...prev, apiStatus: 'active' }));
           }
         } else {
-          console.log('❌ Iframe API not available');
+          console.log('❌ Iframe SCORM 1.2 API not available');
         }
       } catch (e) {
-        console.error('❌ Iframe API test failed:', e);
+        console.error('❌ Iframe SCORM 1.2 API test failed:', e);
       }
     } else {
       console.log('❌ Iframe content window not available');
@@ -1057,19 +995,24 @@ export function SCORMPlayer({
     
     // Test SCORM adapter
     if (scormAdapterRef.current) {
-      console.log('✓ SCORM adapter available');
-      console.log('SCORM adapter state:', scormAdapterRef.current.getStudentData());
+      console.log('✓ SCORM 1.2 adapter available');
+      console.log('SCORM 1.2 adapter state:', scormAdapterRef.current.getStudentData());
       scormAdapterRef.current.debug();
     } else {
-      console.log('❌ SCORM adapter not available');
+      console.log('❌ SCORM 1.2 adapter not available');
     }
   };
 
   const debugContentLoading = async () => {
-    console.log('=== Debugging Content Loading ===');
+    console.log('=== Debugging SCORM 1.2 Content Loading ===');
     
     if (!packageId) {
-      console.log('No packageId provided - running in demo mode');
+      console.log('No packageId provided - cannot debug content loading');
+      toast({
+        title: "No Package ID",
+        description: "Please provide a valid SCORM package ID to debug content loading",
+        variant: "destructive"
+      });
       return;
     }
     
@@ -1118,6 +1061,8 @@ export function SCORMPlayer({
             console.log(`✓ Contains <head>: ${text.includes('<head')}`);
             console.log(`✓ Contains <body>: ${text.includes('<body')}`);
             console.log(`✓ Contains <script>: ${text.includes('<script')}`);
+            console.log(`✓ Contains SCORM references: ${text.includes('scorm') || text.includes('SCORM')}`);
+            console.log(`✓ Contains API references: ${text.includes('API') || text.includes('api')}`);
           }
           break;
         } else {
@@ -1130,17 +1075,32 @@ export function SCORMPlayer({
         console.log('Iframe src:', iframeRef.current.src);
         console.log('Iframe readyState:', iframeRef.current.contentDocument?.readyState);
         console.log('Iframe contentWindow available:', !!iframeRef.current.contentWindow);
+        
+        // Check if SCORM 1.2 API is available in iframe
+        if (iframeRef.current.contentWindow) {
+          const iframeAPI = (iframeRef.current.contentWindow as any).API;
+          console.log('Iframe SCORM 1.2 API available:', !!iframeAPI);
+          
+          if (iframeAPI) {
+            try {
+              const initResult = iframeAPI.LMSInitialize('');
+              console.log('Iframe SCORM 1.2 initialization result:', initResult);
+            } catch (e) {
+              console.error('Iframe SCORM 1.2 initialization error:', e);
+            }
+          }
+        }
       }
       
       toast({
-        title: "Debug Complete",
+        title: "SCORM 1.2 Debug Complete",
         description: "Check console for detailed debug information"
       });
       
     } catch (error) {
-      console.error('Debug error:', error);
+      console.error('SCORM 1.2 Debug error:', error);
       toast({
-        title: "Debug Failed",
+        title: "SCORM 1.2 Debug Failed",
         description: error instanceof Error ? error.message : "Debug operation failed",
         variant: "destructive"
       });
@@ -1148,29 +1108,14 @@ export function SCORMPlayer({
   };
 
   const testContentLoading = async () => {
-    console.log('=== Testing Content Loading ===');
+    console.log('=== Testing SCORM 1.2 Content Loading ===');
     
     if (!packageId) {
-      console.log('No packageId - testing demo mode');
-      // Test demo content loading
-      const demoItem = {
-        identifier: 'test',
-        title: 'Test Content',
-        href: 'test.html',
-        isVisible: true,
-        children: []
-      };
-      
-      const demoContent = createDemoContent(demoItem);
-      const blob = new Blob([demoContent], { type: 'text/html' });
-      const url = URL.createObjectURL(blob);
-      
-      console.log('Demo content URL:', url);
-      console.log('Demo content length:', demoContent.length);
-      
+      console.log('No packageId provided - cannot test content loading');
       toast({
-        title: "Demo Test Complete",
-        description: "Demo content created successfully"
+        title: "No Package ID",
+        description: "Please provide a valid SCORM package ID to test content loading",
+        variant: "destructive"
       });
       return;
     }
@@ -1211,35 +1156,37 @@ export function SCORMPlayer({
       }
       
       const testFile = htmlFiles[0];
-      console.log('Testing file:', testFile);
+      console.log('Testing SCORM 1.2 file:', testFile);
       
       const blob = await SCORMPackageManager.getPackageFile(packageId, testFile);
       if (blob) {
         const text = await blob.text();
-        console.log('File loaded successfully:', {
+        console.log('SCORM 1.2 file loaded successfully:', {
           size: blob.size,
           textLength: text.length,
           hasHead: text.includes('<head'),
           hasBody: text.includes('<body'),
-          hasScript: text.includes('<script')
+          hasScript: text.includes('<script'),
+          hasScormReferences: text.includes('scorm') || text.includes('SCORM'),
+          hasApiReferences: text.includes('API') || text.includes('api')
         });
         
         toast({
-          title: "File Load Test Successful",
+          title: "SCORM 1.2 File Load Test Successful",
           description: `Successfully loaded ${testFile} (${blob.size} bytes)`
         });
       } else {
         toast({
-          title: "File Load Test Failed",
+          title: "SCORM 1.2 File Load Test Failed",
           description: `Failed to load ${testFile}`,
           variant: "destructive"
         });
       }
       
     } catch (error) {
-      console.error('Test error:', error);
+      console.error('SCORM 1.2 Test error:', error);
       toast({
-        title: "Test Failed",
+        title: "SCORM 1.2 Test Failed",
         description: error instanceof Error ? error.message : "Test operation failed",
         variant: "destructive"
       });
@@ -1258,15 +1205,12 @@ export function SCORMPlayer({
             try {
               console.log('Storyline requesting asset:', path);
               
-              // Try to get the asset from the package
-              const response = await fetch('/api/scorm-asset?packageId=${packageId}&path=' + encodeURIComponent(path));
-              if (response.ok) {
-                const blob = await response.blob();
-                return URL.createObjectURL(blob);
-              }
+              // Use our client-side asset handler
+              const assetUrl = '/api/scorm-asset?packageId=${packageId}&path=' + encodeURIComponent(path);
+              console.log('Asset URL:', assetUrl);
               
-              // Fallback to original path
-              return path;
+              // For now, return the asset URL - the URL rewriting should handle this
+              return assetUrl;
             } catch (e) {
               console.warn('Failed to load asset:', path, e);
               return path;
@@ -1286,7 +1230,7 @@ export function SCORMPlayer({
                     // Handle asset paths
                     if (value && !value.startsWith('http') && !value.startsWith('data:')) {
                       console.log('Intercepting asset:', value);
-                      // For now, let it load normally but log it
+                      // The URL rewriting should have already handled this
                     }
                   }
                   return originalSetAttribute.call(this, name, value);
@@ -1446,17 +1390,17 @@ export function SCORMPlayer({
               {state.apiStatus === 'active' ? (
                 <>
                   <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse mr-1" />
-                  SCORM Active
+                  SCORM 1.2 Active
                 </>
               ) : state.apiStatus === 'connected' ? (
                 <>
                   <div className="h-2 w-2 bg-yellow-500 rounded-full mr-1" />
-                  SCORM Ready
+                  SCORM 1.2 Ready
                 </>
               ) : (
                 <>
                   <div className="h-2 w-2 bg-red-500 rounded-full mr-1" />
-                  SCORM Disconnected
+                  SCORM 1.2 Disconnected
                 </>
               )}
             </Badge>
@@ -1516,7 +1460,7 @@ export function SCORMPlayer({
                 className="w-full justify-between p-3 text-sm"
                 onClick={() => setState(prev => ({ ...prev, showDebugInfo: !prev.showDebugInfo }))}
               >
-                <span className="font-medium">SCORM Debug Info</span>
+                <span className="font-medium">SCORM 1.2 Debug Info</span>
                 {state.showDebugInfo ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
               </Button>
               
@@ -1529,7 +1473,7 @@ export function SCORMPlayer({
                   </div>
                   
                   <div className="bg-muted p-2 rounded">
-                    <div className="font-semibold mb-1">API Status</div>
+                    <div className="font-semibold mb-1">SCORM 1.2 API Status</div>
                     <div className={cn(
                       "inline-flex items-center gap-1 px-2 py-1 rounded text-xs",
                       state.apiStatus === 'active' ? 'bg-green-100 text-green-800' : 
@@ -1563,7 +1507,7 @@ export function SCORMPlayer({
                       className="w-full text-xs"
                       onClick={testSCORMConnection}
                     >
-                      Test SCORM API
+                      Test SCORM 1.2 API
                     </Button>
                     <Button
                       variant="outline"
@@ -1593,6 +1537,567 @@ export function SCORMPlayer({
                       variant="outline"
                       size="sm"
                       className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to debug assets",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          const assetInfo = await debugPackageAssets(packageId);
+                          console.log('Package asset debug info:', assetInfo);
+                          
+                          if (assetInfo.packageExists) {
+                            toast({
+                              title: "Asset Debug Complete",
+                              description: `Found ${assetInfo.fileCount} files, ${Object.keys(assetInfo.assetTypes).length} file types`
+                            });
+                          } else {
+                            toast({
+                              title: "Package Not Found",
+                              description: "Package not found for asset debugging",
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('Asset debug error:', error);
+                          toast({
+                            title: "Asset Debug Failed",
+                            description: error instanceof Error ? error.message : "Debug operation failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Debug Package Assets
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test API",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Get debug info to find a test file
+                          const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+                          if (!debugInfo.packageExists) {
+                            toast({
+                              title: "Package Not Found",
+                              description: "Package not found for API testing",
+                              variant: "destructive"
+                            });
+                            return;
+                          }
+                          
+                          // Test with the first file found
+                          const testFile = debugInfo.fileList[0];
+                          if (!testFile) {
+                            toast({
+                              title: "No Files",
+                              description: "No files found in package for API testing",
+                              variant: "destructive"
+                            });
+                            return;
+                          }
+                          
+                          console.log(`Testing mock API with file: ${testFile}`);
+                          const success = await testMockSCORMAPI(packageId, testFile);
+                          
+                          if (success) {
+                            toast({
+                              title: "Mock API Test Successful",
+                              description: `Successfully served ${testFile} via mock API`
+                            });
+                          } else {
+                            toast({
+                              title: "Mock API Test Failed",
+                              description: `Failed to serve ${testFile} via mock API`,
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('Mock API test error:', error);
+                          toast({
+                            title: "Mock API Test Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Mock API
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={() => {
+                        console.log('=== Testing URL Rewriting ===');
+                        const results = testURLRewriting();
+                        console.log('URL rewriting test results:', results);
+                        toast({
+                          title: "URL Rewriting Test",
+                          description: `Test completed. Check console for details. Success: ${results.success}`
+                        });
+                      }}
+                    >
+                      Test URL Rewriting
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test URL rewriting",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Get debug info to find an HTML file
+                          const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+                          if (!debugInfo.packageExists) {
+                            toast({
+                              title: "Package Not Found",
+                              description: "Package not found for URL rewriting test",
+                              variant: "destructive"
+                            });
+                            return;
+                          }
+                          
+                          // Find an HTML file to test with
+                          const htmlFiles = debugInfo.fileList.filter(f => 
+                            f.toLowerCase().endsWith('.html') || f.toLowerCase().endsWith('.htm')
+                          );
+                          
+                          if (htmlFiles.length === 0) {
+                            toast({
+                              title: "No HTML Files",
+                              description: "No HTML files found in package for URL rewriting test",
+                              variant: "destructive"
+                            });
+                            return;
+                          }
+                          
+                          const testFile = htmlFiles[0];
+                          console.log(`Testing URL rewriting with file: ${testFile}`);
+                          const results = await testURLRewritingWithPackage(packageId, testFile);
+                          
+                          if (results) {
+                            toast({
+                              title: "URL Rewriting Test Complete",
+                              description: `Tested ${testFile}. Success: ${results.success}. Check console for details.`
+                            });
+                          } else {
+                            toast({
+                              title: "URL Rewriting Test Failed",
+                              description: `Failed to test ${testFile}`,
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('URL rewriting test error:', error);
+                          toast({
+                            title: "URL Rewriting Test Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test URL Rewriting with Package
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        console.log('=== Testing Path Resolution ===');
+                        await testPathResolution();
+                        toast({
+                          title: "Path Resolution Test",
+                          description: "Check console for path resolution test results"
+                        });
+                      }}
+                    >
+                      Test Path Resolution
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to list files",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          const debugInfo = await SCORMPackageManager.getPackageDebugInfo(packageId);
+                          console.log('=== Package Files ===');
+                          console.log('Package ID:', packageId);
+                          console.log('Total files:', debugInfo.fileCount);
+                          console.log('All files:', debugInfo.fileList);
+                          
+                          // Look for shared files specifically
+                          const sharedFiles = debugInfo.fileList.filter(f => f.includes('shared/'));
+                          console.log('Shared files:', sharedFiles);
+                          
+                          // Look for JavaScript files
+                          const jsFiles = debugInfo.fileList.filter(f => f.toLowerCase().endsWith('.js'));
+                          console.log('JavaScript files:', jsFiles);
+                          
+                          toast({
+                            title: "Package Files Listed",
+                            description: `Found ${debugInfo.fileCount} files. Check console for details.`
+                          });
+                        } catch (error) {
+                          console.error('Error listing package files:', error);
+                          toast({
+                            title: "Error Listing Files",
+                            description: error instanceof Error ? error.message : "Failed to list files",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      List Package Files
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test file loading",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test loading the specific files that are failing
+                          const testFiles = [
+                            'shared/scormfunctions.js',
+                            'shared/contentfunctions.js',
+                            'shared/style.css'
+                          ];
+                          
+                          console.log('=== Testing File Loading ===');
+                          for (const filePath of testFiles) {
+                            console.log(`Testing file: ${filePath}`);
+                            const blob = await SCORMPackageManager.getPackageFile(packageId, filePath);
+                            if (blob) {
+                              console.log(`✅ Found: ${filePath} (${blob.size} bytes)`);
+                            } else {
+                              console.log(`❌ Not found: ${filePath}`);
+                            }
+                          }
+                          
+                          toast({
+                            title: "File Loading Test Complete",
+                            description: "Check console for file loading test results"
+                          });
+                        } catch (error) {
+                          console.error('Error testing file loading:', error);
+                          toast({
+                            title: "File Loading Test Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test File Loading
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test mock API",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test the mock API directly
+                          const testFiles = [
+                            'shared/scormfunctions.js',
+                            'shared/contentfunctions.js',
+                            'shared/style.css'
+                          ];
+                          
+                          console.log('=== Testing Mock API ===');
+                          for (const filePath of testFiles) {
+                            console.log(`Testing mock API for: ${filePath}`);
+                            const success = await testMockSCORMAPI(packageId, filePath);
+                            console.log(`Mock API result for ${filePath}: ${success ? 'SUCCESS' : 'FAILED'}`);
+                          }
+                          
+                          toast({
+                            title: "Mock API Test Complete",
+                            description: "Check console for mock API test results"
+                          });
+                        } catch (error) {
+                          console.error('Error testing mock API:', error);
+                          toast({
+                            title: "Mock API Test Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Mock API Directly
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test fetch override",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test if fetch override is working
+                          console.log('=== Testing Fetch Override ===');
+                          console.log('Current fetch function:', window.fetch);
+                          
+                          // Test a direct fetch request
+                          const testUrl = `/api/scorm-asset?packageId=${encodeURIComponent(packageId)}&path=shared%2Fscormfunctions.js`;
+                          console.log('Testing fetch request to:', testUrl);
+                          
+                          const response = await fetch(testUrl);
+                          console.log('Fetch response status:', response.status);
+                          console.log('Fetch response ok:', response.ok);
+                          
+                          if (response.ok) {
+                            const blob = await response.blob();
+                            console.log('Fetch response blob size:', blob.size);
+                            toast({
+                              title: "Fetch Override Working",
+                              description: `Successfully fetched file (${blob.size} bytes)`
+                            });
+                          } else {
+                            const text = await response.text();
+                            console.log('Fetch response error:', text);
+                            toast({
+                              title: "Fetch Override Failed",
+                              description: `Failed to fetch file: ${response.status} ${response.statusText}`,
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('Error testing fetch override:', error);
+                          toast({
+                            title: "Fetch Override Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Fetch Override
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test global function",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test the global function
+                          console.log('=== Testing Global Function ===');
+                          const success = await (window as any).testMockSCORMAPI(packageId, 'shared/scormfunctions.js');
+                          console.log('Global function result:', success);
+                          
+                          toast({
+                            title: "Global Function Test",
+                            description: success ? "Global function working" : "Global function failed",
+                            variant: success ? "default" : "destructive"
+                          });
+                        } catch (error) {
+                          console.error('Error testing global function:', error);
+                          toast({
+                            title: "Global Function Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Global Function
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test iframe fetch",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test if the iframe can access the mock API
+                          console.log('=== Testing Iframe Fetch Access ===');
+                          if (iframeRef.current?.contentWindow) {
+                            const testUrl = `/api/scorm-asset?packageId=${encodeURIComponent(packageId)}&path=shared%2Fscormfunctions.js`;
+                            console.log('Testing iframe fetch with URL:', testUrl);
+                            
+                            const response = await (iframeRef.current.contentWindow as any).fetch(testUrl);
+                            console.log('Iframe fetch response status:', response.status);
+                            console.log('Iframe fetch response ok:', response.ok);
+                            
+                            if (response.ok) {
+                              const blob = await response.blob();
+                              console.log('Iframe fetch response blob size:', blob.size);
+                              toast({
+                                title: "Iframe Fetch Working",
+                                description: `Successfully fetched file via iframe (${blob.size} bytes)`
+                              });
+                            } else {
+                              const text = await response.text();
+                              console.log('Iframe fetch response error:', text);
+                              toast({
+                                title: "Iframe Fetch Failed",
+                                description: `Failed to fetch file via iframe: ${response.status} ${response.statusText}`,
+                                variant: "destructive"
+                              });
+                            }
+                          } else {
+                            toast({
+                              title: "No Iframe",
+                              description: "No iframe available for testing",
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('Error testing iframe fetch:', error);
+                          toast({
+                            title: "Iframe Fetch Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Iframe Fetch
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={async () => {
+                        if (!packageId) {
+                          toast({
+                            title: "No Package ID",
+                            description: "Please provide a valid SCORM package ID to test current iframe",
+                            variant: "destructive"
+                          });
+                          return;
+                        }
+                        
+                        try {
+                          // Test the current iframe's fetch override
+                          console.log('=== Testing Current Iframe Fetch Override ===');
+                          if (iframeRef.current?.contentWindow) {
+                            const iframeWindow = iframeRef.current.contentWindow as any;
+                            console.log('Iframe fetch function:', iframeWindow.fetch);
+                            console.log('Iframe fetch override installed:', iframeWindow.fetch !== window.fetch);
+                            
+                            // Test if the iframe's fetch is properly overridden
+                            const testUrl = `/api/scorm-asset?packageId=${encodeURIComponent(packageId)}&path=shared%2Fscormfunctions.js`;
+                            console.log('Testing current iframe fetch with URL:', testUrl);
+                            
+                            const response = await iframeWindow.fetch(testUrl);
+                            console.log('Current iframe fetch response status:', response.status);
+                            console.log('Current iframe fetch response ok:', response.ok);
+                            
+                            if (response.ok) {
+                              const blob = await response.blob();
+                              console.log('Current iframe fetch response blob size:', blob.size);
+                              toast({
+                                title: "Current Iframe Fetch Working",
+                                description: `Successfully fetched file via current iframe (${blob.size} bytes)`
+                              });
+                            } else {
+                              const text = await response.text();
+                              console.log('Current iframe fetch response error:', text);
+                              toast({
+                                title: "Current Iframe Fetch Failed",
+                                description: `Failed to fetch file via current iframe: ${response.status} ${response.statusText}`,
+                                variant: "destructive"
+                              });
+                            }
+                          } else {
+                            toast({
+                              title: "No Current Iframe",
+                              description: "No current iframe available for testing",
+                              variant: "destructive"
+                            });
+                          }
+                        } catch (error) {
+                          console.error('Error testing current iframe fetch:', error);
+                          toast({
+                            title: "Current Iframe Fetch Error",
+                            description: error instanceof Error ? error.message : "Test failed",
+                            variant: "destructive"
+                          });
+                        }
+                      }}
+                    >
+                      Test Current Iframe Fetch
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
                       onClick={() => {
                         if (iframeRef.current?.contentWindow) {
                           try {
@@ -1601,7 +2106,7 @@ export function SCORMPlayer({
                             (iframeRef.current.contentWindow as any).findAPI = (window as any).findAPI;
                             (iframeRef.current.contentWindow as any).getAPI = (window as any).getAPI;
                             
-                            console.log('✓ Manual API injection completed');
+                            console.log('✓ Manual SCORM 1.2 API injection completed');
                             setState(prev => ({ ...prev, apiStatus: 'connected' }));
                             
                             // Also trigger initialization
@@ -1611,28 +2116,71 @@ export function SCORMPlayer({
                               if (initResult === 'true') {
                                 setState(prev => ({ ...prev, apiStatus: 'active' }));
                                 toast({
-                                  title: "API Activated",
-                                  description: "SCORM API injected and activated successfully"
+                                  title: "SCORM 1.2 API Activated",
+                                  description: "SCORM 1.2 API injected and activated successfully"
                                 });
                               } else {
                                 toast({
-                                  title: "API Injected",
-                                  description: "SCORM API injected but initialization failed"
+                                  title: "SCORM 1.2 API Injected",
+                                  description: "SCORM 1.2 API injected but initialization failed"
                                 });
                               }
                             }
                           } catch (e) {
-                            console.error('❌ Manual API injection failed:', e);
+                            console.error('❌ Manual SCORM 1.2 API injection failed:', e);
                             toast({
-                              title: "Injection Failed",
-                              description: "Failed to inject SCORM API",
+                              title: "SCORM 1.2 Injection Failed",
+                              description: "Failed to inject SCORM 1.2 API",
                               variant: "destructive"
                             });
                           }
                         }
                       }}
                     >
-                      Inject API Manually
+                      Inject SCORM 1.2 API Manually
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full text-xs"
+                      onClick={() => {
+                        if (iframeRef.current?.contentWindow) {
+                          try {
+                            // Manually inject fetch override into iframe
+                            const iframeWindow = iframeRef.current.contentWindow as any;
+                            const originalFetch = iframeWindow.fetch;
+                            
+                            iframeWindow.fetch = async function(input: any, init?: any) {
+                              const url = typeof input === 'string' ? input : input.toString();
+                              console.log('Manual iframe fetch called with URL:', url);
+                              if (url.includes('/api/scorm-asset')) {
+                                console.log('Manual iframe: Intercepting SCORM asset request to:', url);
+                                // Use the parent window's fetch to ensure it goes through our mock API
+                                if (window.fetch) {
+                                  console.log('Manual iframe: Using parent window fetch for SCORM asset');
+                                  return window.fetch(input, init);
+                                }
+                              }
+                              return originalFetch(input, init);
+                            };
+                            
+                            console.log('✓ Manual fetch override injected into iframe');
+                            toast({
+                              title: "Fetch Override Injected",
+                              description: "Manual fetch override injected into iframe"
+                            });
+                          } catch (e) {
+                            console.error('❌ Manual fetch override injection failed:', e);
+                            toast({
+                              title: "Fetch Override Injection Failed",
+                              description: "Failed to inject fetch override",
+                              variant: "destructive"
+                            });
+                          }
+                        }
+                      }}
+                    >
+                      Inject Fetch Override Manually
                     </Button>
                   </div>
                 </div>
